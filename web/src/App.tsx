@@ -20,6 +20,14 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ConsentBanner } from "./components/ConsentBanner";
 import { Faq } from "./components/Faq";
 import { track } from "./analytics";
+import {
+  DEFAULT_STUDIO_CONFIG,
+  STEMS_FOR_MODE,
+  fetchCapabilities,
+  type ModelSize,
+  type ServerCapabilities,
+  type StudioConfig,
+} from "./capabilities";
 
 /**
  * A failure surfaced on the welcome screen. `server` means the backend is
@@ -92,26 +100,60 @@ export function App() {
   const [stereo, setStereo] = useState(false);
   const [userScrolled, setUserScrolled] = useState(false);
   const [condSelected, setCondSelected] = useState<Set<string>>(() => new Set());
+  const [capabilities, setCapabilities] = useState<ServerCapabilities | null>(null);
+  const [studioConfig, setStudioConfig] = useState<StudioConfig>(DEFAULT_STUDIO_CONFIG);
+  const [stageMessage, setStageMessage] = useState<string | null>(null);
+  const [referenceSource, setReferenceSource] = useState<string>("mix");
   // True while a file is being dragged over the window. On the welcome screen
   // this swaps the panel's prompt in place instead of showing the overlay.
   const [dragging, setDragging] = useState(false);
 
-  // Mirror of the selected conditioning set, read at submit time without
-  // re-creating `transcribe` whenever the selection changes.
+  // Mirror of the selected conditioning set & studio config, read at submit time.
   const condRef = useRef(condSelected);
   condRef.current = condSelected;
+  const studioConfigRef = useRef(studioConfig);
+  studioConfigRef.current = studioConfig;
   // Read inside the per-frame loop (which only re-subscribes on `audio`) so the
   // transcribed-so-far tint is only drawn while a transcription is running.
   const appStateRef = useRef(appState);
   appStateRef.current = appState;
 
+  // Query backend capabilities once on startup to configure defaults (separation, GPU, HF auth).
+  useEffect(() => {
+    let cancelled = false;
+    fetchCapabilities().then((caps) => {
+      if (cancelled || !caps) return;
+      setCapabilities(caps);
+      setStudioConfig((prev) => {
+        const separation = caps.separation_available ? prev.separation : "none";
+        const defaultSize = (
+          caps.available_models.includes(caps.default_model as ModelSize)
+            ? caps.default_model
+            : prev.modelSize
+        ) as ModelSize;
+        return {
+          ...prev,
+          separation,
+          stems: separation === "none" ? [] : [...STEMS_FOR_MODE[separation]],
+          modelSize: defaultSize,
+        };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const { transcribe, abort } = useTranscription({
     audio,
     rollRef,
     getConditioning: () => Array.from(condRef.current),
+    getStudioConfig: () => studioConfigRef.current,
     progress,
+    onStage: setStageMessage,
     // A failed transcription bounces back to the welcome screen with a message.
     onError: (message) => {
+      setStageMessage(null);
       setSubmit({ phase: "idle" });
       setError({ kind: "file", message });
       setScreen("welcome");
@@ -146,6 +188,8 @@ export function App() {
     });
     // Drop any leftover file error from a previous failed attempt.
     setError(null);
+    setStageMessage(null);
+    setReferenceSource("mix");
     setSubmit({ phase: "submitting" });
     transcribe(selectedFile);
   }
@@ -178,6 +222,8 @@ export function App() {
     rollRef.current?.clear();
     setInstruments([]);
     setResult(null);
+    setStageMessage(null);
+    setReferenceSource("mix");
     setUserScrolled(false);
     setAppState("idle");
     setSubmit({ phase: "idle" });
@@ -412,6 +458,9 @@ export function App() {
             onUseExample={useExample}
             condSelected={condSelected}
             onCondChange={setCondSelected}
+            capabilities={capabilities}
+            studioConfig={studioConfig}
+            onStudioConfigChange={setStudioConfig}
             onTranscribe={startTranscription}
             submitState={submit}
             onCancelSubmit={cancelSubmit}
@@ -447,6 +496,18 @@ export function App() {
                 setUserScrolled(true);
               }
             }}
+            stems={result?.stems ?? []}
+            referenceSource={referenceSource}
+            onReferenceSourceChange={(src) => {
+              setReferenceSource(src);
+              const url =
+                src !== "mix" && result?.sessionId
+                  ? `/sessions/${result.sessionId}/stems/${src}.wav`
+                  : undefined;
+              audio.setReferenceSource(src, url).catch((e) => {
+                console.error("Failed to switch reference stem:", e);
+              });
+            }}
           />
 
           <PianoRollCanvas rollRef={rollRef} audio={audio} setUserScrolled={setUserScrolled} />
@@ -471,6 +532,7 @@ export function App() {
               and starting over. */}
           <OutputBar
             transcribing={appState === "transcribing"}
+            stageMessage={stageMessage}
             progressFillRef={progressFillRef}
             progressLabelRef={progressLabelRef}
             result={result}

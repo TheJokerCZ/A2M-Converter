@@ -1,11 +1,13 @@
 import type { BeatGrid } from "./pianoroll";
 
-/** A note as /transcribe streamed it — times not yet moved by `onset_delay`. */
+/** A note in audio-aligned or streamed time, with MIDI velocity (1..127). */
 export type ExportNote = {
+  id?: number;
   instrument: string;
   pitch: number;
   start: number;
   end: number;
+  velocity?: number;
 };
 
 /** The user's corrections to the detected grid; null keeps what was detected. */

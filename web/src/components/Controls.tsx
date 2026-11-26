@@ -3,6 +3,7 @@ import clsx from "clsx";
 import type { AudioEngine } from "../audio";
 import { Button } from "./Button";
 import { IconPlay, IconPause } from "./icons";
+import { STEM_LABELS } from "../capabilities";
 
 export function Controls(props: {
   audio: AudioEngine;
@@ -15,9 +16,24 @@ export function Controls(props: {
   /** Whether the roll auto-follows the playhead (toggled off by manual scrolling). */
   following: boolean;
   onToggleFollow: () => void;
+  /** Separated stem names available for auditioning alongside MIDI. */
+  stems?: string[];
+  referenceSource?: string;
+  onReferenceSourceChange?: (source: string) => void;
 }) {
-  const { audio, clockRef, mix, onMixChange, stereo, onStereoChange, following, onToggleFollow } =
-    props;
+  const {
+    audio,
+    clockRef,
+    mix,
+    onMixChange,
+    stereo,
+    onStereoChange,
+    following,
+    onToggleFollow,
+    stems = [],
+    referenceSource = "mix",
+    onReferenceSourceChange,
+  } = props;
   // The transport's state isn't React state (and it can auto-stop at the end),
   // so poll it each frame to keep the toggle button's label in sync.
   const [playing, setPlaying] = useState(false);
@@ -63,6 +79,27 @@ export function Controls(props: {
       >
         0.0s
       </span>
+      {stems.length > 0 && onReferenceSourceChange && (
+        <label className="inline-flex items-center gap-1.5 text-xs text-muted">
+          <span>Audio:</span>
+          <select
+            aria-label="Reference audio source"
+            className="rounded-md border border-line-strong bg-surface-2 px-2 py-1 text-xs text-content outline-none focus:border-accent"
+            value={referenceSource}
+            onChange={(e) => {
+              onReferenceSourceChange(e.target.value);
+              e.currentTarget.blur();
+            }}
+          >
+            <option value="mix">Original Mix</option>
+            {stems.map((s) => (
+              <option key={s} value={s}>
+                Stem: {STEM_LABELS[s] ?? s}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label
         className={clsx(
           "ml-auto inline-flex items-center gap-2.5 text-sm text-muted max-[760px]:ml-0",

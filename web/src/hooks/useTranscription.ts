@@ -10,6 +10,7 @@ import type { AudioEngine } from "../audio";
 import type { ProgressEstimator } from "../progress";
 import { PianoRoll, type BeatGrid, type RollNote } from "../pianoroll";
 import type { ExportNote } from "../export";
+import type { StudioConfig } from "../capabilities";
 
 type StartEvent = {
   type: "start";
@@ -23,10 +24,25 @@ type EndEvent = {
   end_time: number;
   start_event_index: number;
 };
+type StageEvent = {
+  type: "stage";
+  stage: string;
+  message: string;
+  stem?: string;
+  stem_index?: number;
+  stem_total?: number;
+};
+type ErrorEvent = {
+  type: "error";
+  message: string;
+};
 type TranscriptionCompleteEvent = {
   type: "transcription_complete";
   data: string; // base64-encoded .mid file
   beat_grid: BeatGrid | null; // null when no beats were detected
+  session_id?: string | null;
+  stems?: string[];
+  velocities?: Record<string, number>;
 };
 type ProgressMsg = {
   type: "progress";
@@ -34,7 +50,12 @@ type ProgressMsg = {
   total: number; // total chunks
 };
 type StreamedEvent =
-  StartEvent | EndEvent | TranscriptionCompleteEvent | ProgressMsg;
+  | StartEvent
+  | EndEvent
+  | StageEvent
+  | ErrorEvent
+  | TranscriptionCompleteEvent
+  | ProgressMsg;
 
 export type AppState = "idle" | "transcribing" | "done" | "error";
 
@@ -43,12 +64,16 @@ export type TranscriptionResult = {
   /** The MIDI as the server first wrote it, unquantized and on the detected
    *  grid: what /auralize synthesizes against the original audio. */
   midi: Blob;
-  /** Every note as streamed, for /export to write out with other options. */
+  /** Notes in audio-aligned time (already shifted by -onset_delay), with ids and velocities. */
   notes: ExportNote[];
   /** The detected grid, null when no beats were found. */
   beatGrid: BeatGrid | null;
   /** What to call an exported MIDI: the uploaded file's name, as .mid. */
   filename: string;
+  /** Backend session id holding separated WAV stems, or null. */
+  sessionId: string | null;
+  /** Separated stem names available for auditioning / FL bundle export. */
+  stems: string[];
 };
 
 /** Stable id for this browser tab, sent as `X-Client-Id` on every transcribe
@@ -73,8 +98,12 @@ export interface TranscriptionDeps {
   rollRef: RefObject<PianoRoll | null>;
   /** Conditioning instruments selected in the UI, read at submit time. */
   getConditioning: () => string[];
+  /** Studio pipeline configuration (separation, stems, model, beam), read at submit time. */
+  getStudioConfig: () => StudioConfig;
   /** Smooths chunk-completion anchors into a live progress fraction + ETA. */
   progress: ProgressEstimator;
+  /** Called on Studio pipeline stage updates (separating, loading model, transcribing stem...). */
+  onStage: (message: string | null) => void;
   /** Called when a (non-superseded) transcription fails, so the UI can recover.
    *  `message` is a user-facing explanation (server-sent when available). */
   onError: (message: string) => void;
@@ -105,7 +134,9 @@ export function useTranscription(deps: TranscriptionDeps) {
     audio,
     rollRef,
     getConditioning,
+    getStudioConfig,
     progress,
+    onStage,
     onError,
     onAccepted,
     onBusy,
@@ -119,9 +150,9 @@ export function useTranscription(deps: TranscriptionDeps) {
   // Names already surfaced in the instrument list this run.
   const knownRef = useRef(new Set<string>());
   // Provisional notes awaiting their matching `end` event, keyed by start index.
-  const openNotesRef = useRef(new Map<number, { startNote: RollNote }>());
-  // Finished notes of this run, in streamed (unshifted) time, for /export.
-  const notesRef = useRef<ExportNote[]>([]);
+  const openNotesRef = useRef(new Map<number, { startNote: RollNote; index: number }>());
+  // Finished notes of this run, in streamed (unshifted) time, keyed with backend index.
+  const notesRef = useRef<Array<ExportNote & { id: number; velocity: number }>>([]);
   // The in-flight transcription, if any. Starting a new one aborts this so its
   // (now stale) SSE stream stops feeding notes into the freshly-reset UI/audio.
   const activeRef = useRef<AbortController | null>(null);
@@ -153,28 +184,27 @@ export function useTranscription(deps: TranscriptionDeps) {
       addInstrument(ev.instrument);
       // Provisional end = start (will be patched on the matching end event).
       const note: RollNote = {
+        id: ev.index,
         pitch: ev.pitch,
         start: ev.start_time,
         end: ev.start_time,
         instrument: ev.instrument,
+        velocity: 100,
       };
       roll?.addNote(note);
-      openNotesRef.current.set(ev.index, { startNote: note });
+      openNotesRef.current.set(ev.index, { startNote: note, index: ev.index });
     } else {
       const open = openNotesRef.current.get(ev.start_event_index);
       if (!open) return;
       open.startNote.end = ev.end_time;
-      // Recorded before setBeatGrid moves the roll's copy by the onset delay:
-      // /export takes the times as streamed and moves them itself.
       notesRef.current.push({
+        id: open.index,
         instrument: open.startNote.instrument,
         pitch: open.startNote.pitch,
         start: open.startNote.start,
         end: ev.end_time,
+        velocity: 100,
       });
-      // Finalize geometry in the roll too — it stamps the reveal time and
-      // restacks any overlapping same-pitch notes. (The line above keeps `end`
-      // correct for audio scheduling even if the canvas hasn't mounted yet.)
       roll?.setNoteEnd(open.startNote, ev.end_time);
       openNotesRef.current.delete(ev.start_event_index);
       audio.scheduleNote({
@@ -182,6 +212,7 @@ export function useTranscription(deps: TranscriptionDeps) {
         pitch: open.startNote.pitch,
         start: open.startNote.start,
         end: open.startNote.end,
+        velocity: 100,
       });
     }
   }
@@ -218,8 +249,19 @@ export function useTranscription(deps: TranscriptionDeps) {
     // Kept for the completion event, which fires after the stream has ended.
     let beatGrid: BeatGrid | null = null;
     try {
+      onStage("Starting Studio pipeline…");
       const cond = getConditioning();
-      const extra = cond.length > 0 ? { instruments: cond } : undefined;
+      const studio = getStudioConfig();
+      const extra: Record<string, string | string[]> = {
+        studio: "true",
+        separation: studio.separation,
+        model_size: studio.modelSize,
+        beam_size: String(studio.beamSize),
+      };
+      if (cond.length > 0) extra.instruments = cond;
+      if (studio.separation !== "none" && studio.stems.length > 0) {
+        extra.stems = studio.stems;
+      }
       for await (const raw of streamTranscribeWithRetry("/transcribe", file, {
         extra,
         signal: controller.signal,
@@ -244,20 +286,44 @@ export function useTranscription(deps: TranscriptionDeps) {
         // it can't repopulate the piano roll / re-schedule old notes.
         if (isStale()) return;
         const ev = raw as StreamedEvent;
+        if (ev.type === "stage") {
+          onStage(ev.message);
+          continue;
+        }
+        if (ev.type === "error") {
+          throw new TranscribeError(ev.message, { userMessage: ev.message });
+        }
         if (ev.type === "transcription_complete") {
-          // Final event: the assembled MIDI file. Enables the downloads.
+          onStage(null);
           beatGrid = ev.beat_grid ?? null;
+          const onsetDelay = beatGrid?.onset_delay ?? 0;
+          const velMap = ev.velocities ?? {};
+          const alignedNotes = notesRef.current.map((n) => {
+            const vel = velMap[String(n.id)] ?? n.velocity ?? 100;
+            const start = Math.max(0, n.start - onsetDelay);
+            const end = Math.max(start + 0.01, n.end - onsetDelay);
+            return { ...n, start, end, velocity: vel };
+          });
           setResult({
             midi: midiBlobOf(ev.data),
-            notes: notesRef.current,
+            notes: alignedNotes,
             beatGrid,
             filename: midiFilename,
+            sessionId: ev.session_id ?? null,
+            stems: ev.stems ?? [],
           });
-          // Tempo came with it — redraw the time grid as bars instead of seconds,
-          // and move the notes onto the beats (the MIDI above already has them
-          // there), in the roll and in the scheduled playback alike.
           rollRef.current?.setBeatGrid(beatGrid);
-          audio.shiftNotes(-(beatGrid?.onset_delay ?? 0));
+          rollRef.current?.replaceNotes(
+            alignedNotes.map((n) => ({
+              id: n.id,
+              instrument: n.instrument,
+              pitch: n.pitch,
+              start: n.start,
+              end: n.end,
+              velocity: n.velocity,
+            })),
+          );
+          audio.replaceNotes(alignedNotes);
           continue;
         }
         if (ev.type === "progress") {

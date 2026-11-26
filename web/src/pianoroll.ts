@@ -1,10 +1,13 @@
 import { INSTRUMENT_ORDER } from "./audio";
 
 export interface RollNote {
+  id?: number;
   pitch: number;
   start: number;
   end: number;
   instrument: string;
+  /** MIDI velocity (1..127), used to modulate note fill brightness/opacity. */
+  velocity?: number;
   /**
    * `performance.now()` at which this note's geometry was finalized (its `end`
    * event arrived), driving the left-to-right reveal. Unset notes are drawn
@@ -334,6 +337,23 @@ export class PianoRoll {
     this.notes.push(n);
     // The transcribed frontier never lags behind the most recent note's onset.
     if (n.start > this.latestNoteStart) this.latestNoteStart = n.start;
+  }
+
+  /** Replace the full note array (used after velocity arrival and live editing). */
+  replaceNotes(notes: RollNote[]) {
+    this.notes = notes.map((n) => ({ ...n, stackOffset: 0 }));
+    let latest = 0;
+    for (let i = 0; i < this.notes.length; i++) {
+      const a = this.notes[i];
+      if (a.start > latest) latest = a.start;
+      for (let j = i + 1; j < this.notes.length; j++) {
+        const b = this.notes[j];
+        if (b.pitch === a.pitch && a.start < b.end && b.start < a.end) {
+          a.stackOffset = (a.stackOffset ?? 0) + 1;
+        }
+      }
+    }
+    this.latestNoteStart = latest;
   }
 
   /**

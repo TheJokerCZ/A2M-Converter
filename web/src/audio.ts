@@ -70,6 +70,7 @@ type NoteOpts = {
   pitch: number;
   start: number;
   end: number;
+  velocity?: number;
 };
 
 export class AudioEngine {
@@ -88,6 +89,8 @@ export class AudioEngine {
   private allNotes: NoteOpts[] = [];
   private autoStopAt: number | null = null;
   /** Decoded original audio + live playback node, for the WAV/MIDI mix. */
+  private mixBuffer: AudioBuffer | null = null;
+  private stemBuffers = new Map<string, AudioBuffer>();
   private wavBuffer: AudioBuffer | null = null;
   private wavSource: AudioBufferSourceNode | null = null;
   private wavGain: GainNode;
@@ -160,16 +163,41 @@ export class AudioEngine {
   /** Decode `file` and remember the buffer for synced WAV playback. */
   async loadWav(file: File) {
     this.stopWavSource();
+    this.mixBuffer = null;
+    this.stemBuffers.clear();
     this.wavBuffer = null;
     const bytes = await file.arrayBuffer();
     try {
-      this.wavBuffer = await this.ctx.decodeAudioData(bytes);
+      this.mixBuffer = await this.ctx.decodeAudioData(bytes);
+      this.wavBuffer = this.mixBuffer;
     } catch {
       // Non-decodable input — keep MIDI-only playback.
+      this.mixBuffer = null;
       this.wavBuffer = null;
     }
     // The stereo-mode WAV level depends on the buffer's channel count.
     this.applyMix();
+  }
+
+  /** Switch reference WAV bus between `"mix"` and any separated stem URL. */
+  async setReferenceSource(sourceKey: string, url?: string) {
+    let nextBuffer: AudioBuffer | null = null;
+    if (sourceKey === "mix" || !url) {
+      nextBuffer = this.mixBuffer;
+    } else if (this.stemBuffers.has(sourceKey)) {
+      nextBuffer = this.stemBuffers.get(sourceKey)!;
+    } else {
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Failed to load stem audio (${resp.status})`);
+      const decoded = await this.ctx.decodeAudioData(await resp.arrayBuffer());
+      this.stemBuffers.set(sourceKey, decoded);
+      nextBuffer = decoded;
+    }
+    this.wavBuffer = nextBuffer;
+    this.applyMix();
+    if (Tone.getTransport().state === "started") {
+      this.startWavSource(this.ctx.currentTime);
+    }
   }
 
   /** Set the MIDI/WAV crossfade. `midiAmount` in [0, 1]. */
@@ -327,6 +355,16 @@ export class AudioEngine {
     this.seek(Tone.getTransport().seconds);
   }
 
+  /** Replace all scheduled notes (after velocity updates or Piano Roll edits). */
+  replaceNotes(notes: NoteOpts[]) {
+    this.allNotes = notes.map((n) => ({ ...n }));
+    this.pendingNotes = [];
+    let maxEnd = 0;
+    for (const n of this.allNotes) if (n.end > maxEnd) maxEnd = n.end;
+    this.autoStopAt = maxEnd > 0 ? maxEnd + 0.3 : null;
+    this.seek(Tone.getTransport().seconds);
+  }
+
   private scheduleNoteRaw(opts: NoteOpts) {
     if (!this.synth) {
       this.pendingNotes.push(opts);
@@ -336,11 +374,12 @@ export class AudioEngine {
     const channel = this.channelFor(opts.instrument);
     this.warmNote(opts.instrument, opts.pitch);
     const duration = Math.max(0.05, opts.end - opts.start);
+    const vel = Math.max(1, Math.min(127, Math.round(opts.velocity ?? NOTE_VELOCITY)));
     // The callback fires slightly ahead of the audio time; passing `time`
     // through lets the worklet apply both events sample-accurately. Pairing
     // the noteOff with its noteOn also guarantees no stuck notes.
     Tone.getTransport().scheduleOnce((time) => {
-      synth.noteOn(channel, opts.pitch, NOTE_VELOCITY, { time });
+      synth.noteOn(channel, opts.pitch, vel, { time });
       synth.noteOff(channel, opts.pitch, { time: time + duration });
     }, opts.start);
   }
@@ -412,6 +451,8 @@ export class AudioEngine {
     this.pendingNotes = [];
     this.autoStopAt = null;
     this.stopWavSource();
+    this.mixBuffer = null;
+    this.stemBuffers.clear();
     this.wavBuffer = null;
     // The instrument list is rebuilt from scratch, so unmute everything.
     this.mutedInstruments.clear();

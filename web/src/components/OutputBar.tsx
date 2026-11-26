@@ -28,6 +28,7 @@ import {
  */
 export function OutputBar(props: {
   transcribing: boolean;
+  stageMessage?: string | null;
   progressFillRef: RefObject<HTMLDivElement | null>;
   progressLabelRef: RefObject<HTMLSpanElement | null>;
   /** The finished transcription's exports, or null while there is none. */
@@ -40,6 +41,7 @@ export function OutputBar(props: {
 }) {
   const {
     transcribing,
+    stageMessage,
     progressFillRef,
     progressLabelRef,
     result,
@@ -189,20 +191,25 @@ export function OutputBar(props: {
   return (
     <div className="col-span-full flex flex-wrap items-center gap-3 rounded-card border border-line bg-surface px-3.5 py-3">
       {transcribing && (
-        <div className="flex min-w-48 flex-1 items-center gap-3">
-          <div className="h-1 flex-1 overflow-hidden rounded-full bg-bg">
-            <div
-              ref={progressFillRef}
-              className="h-full rounded-full bg-accent"
-              style={{ width: "0%" }}
-            />
+        <div className="flex min-w-48 flex-1 flex-col gap-1.5">
+          {stageMessage && (
+            <span className="text-xs font-medium text-content">{stageMessage}</span>
+          )}
+          <div className="flex items-center gap-3">
+            <div className="h-1 flex-1 overflow-hidden rounded-full bg-bg">
+              <div
+                ref={progressFillRef}
+                className="h-full rounded-full bg-accent"
+                style={{ width: "0%" }}
+              />
+            </div>
+            <span
+              ref={progressLabelRef}
+              className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums text-faint"
+            >
+              estimating…
+            </span>
           </div>
-          <span
-            ref={progressLabelRef}
-            className="shrink-0 whitespace-nowrap font-mono text-xs tabular-nums text-faint"
-          >
-            estimating…
-          </span>
         </div>
       )}
 
