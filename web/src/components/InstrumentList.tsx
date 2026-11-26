@@ -40,9 +40,12 @@ function UndetectedRow(props: { name: string }) {
   );
 }
 
-/** An interactive detected instrument with mute + solo controls. */
+/** An interactive detected instrument with mute, solo, count, and merge controls. */
 function InstrumentRow(props: {
   name: string;
+  noteCount?: number;
+  mergeTargets: string[];
+  onMergeInto?: (target: string) => void;
   muted: boolean;
   soloed: boolean;
   onToggleMute: () => void;
@@ -50,59 +53,95 @@ function InstrumentRow(props: {
   /** Hovering the row spotlights this instrument's notes on the piano roll. */
   onHover: (name: string | null) => void;
 }) {
-  const { name, muted, soloed, onToggleMute, onToggleSolo, onHover } = props;
+  const {
+    name,
+    noteCount,
+    mergeTargets,
+    onMergeInto,
+    muted,
+    soloed,
+    onToggleMute,
+    onToggleSolo,
+    onHover,
+  } = props;
   return (
     <li
-      className="group flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-muted transition-colors duration-150 ease-fluid hover:bg-white/[0.04] hover:text-content [animation:rise_0.4s_var(--ease-fluid)_both]"
+      className="group flex flex-col gap-1 rounded-lg px-2.5 py-2 text-muted transition-colors duration-150 ease-fluid hover:bg-white/[0.04] hover:text-content [animation:rise_0.4s_var(--ease-fluid)_both]"
       onMouseEnter={() => onHover(name)}
       onMouseLeave={() => onHover(null)}
     >
-      <div
-        className={clsx(
-          "flex min-w-0 flex-1 items-center gap-2.5 transition-opacity duration-150 ease-fluid",
-          muted && "opacity-10",
-        )}
-      >
-        <span
-          className="size-3 shrink-0 rounded-sm shadow-glow"
-          style={{ background: instrumentColor(name) }}
-        />
-        <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-          {label(name)}
-        </span>
-      </div>
-      <div className="flex items-center gap-0.5">
-        <Button
-          type="button"
-          kind="ghost"
+      <div className="flex items-center gap-2.5">
+        <div
           className={clsx(
-            "-my-1 flex size-6 shrink-0 items-center justify-center rounded-md text-xs font-semibold transition-[opacity,background,color] duration-150 ease-fluid hover:bg-white/[0.08]",
-            soloed
-              ? "text-accent-2 opacity-100"
-              : "text-muted opacity-70 group-hover:opacity-100 hover:text-content",
+            "flex min-w-0 flex-1 items-center gap-2.5 transition-opacity duration-150 ease-fluid",
+            muted && "opacity-10",
           )}
-          title={soloed ? "Unsolo" : "Solo (mute everything else)"}
-          aria-pressed={soloed}
-          onClick={onToggleSolo}
         >
-          S
-        </Button>
-        <Button
-          type="button"
-          kind="ghost"
-          className={clsx(
-            "-my-1 flex size-6 shrink-0 items-center justify-center rounded-md transition-[opacity,background,color] duration-150 ease-fluid hover:bg-white/[0.08]",
-            muted
-              ? "text-red opacity-100"
-              : "text-muted opacity-70 group-hover:opacity-100 hover:text-content",
+          <span
+            className="size-3 shrink-0 rounded-sm shadow-glow"
+            style={{ background: instrumentColor(name) }}
+          />
+          <span className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+            {label(name)}
+          </span>
+          {noteCount !== undefined && (
+            <span className="shrink-0 font-mono text-[10px] tabular-nums text-faint">
+              {noteCount}
+            </span>
           )}
-          title={muted ? "Unmute on MIDI track" : "Mute on MIDI track"}
-          aria-pressed={muted}
-          onClick={onToggleMute}
-        >
-          {muted ? <IconSoundOff /> : <IconSound />}
-        </Button>
+        </div>
+        <div className="flex items-center gap-0.5">
+          <Button
+            type="button"
+            kind="ghost"
+            className={clsx(
+              "-my-1 flex size-6 shrink-0 items-center justify-center rounded-md text-xs font-semibold transition-[opacity,background,color] duration-150 ease-fluid hover:bg-white/[0.08]",
+              soloed
+                ? "text-accent-2 opacity-100"
+                : "text-muted opacity-70 group-hover:opacity-100 hover:text-content",
+            )}
+            title={soloed ? "Unsolo" : "Solo (mute everything else)"}
+            aria-pressed={soloed}
+            onClick={onToggleSolo}
+          >
+            S
+          </Button>
+          <Button
+            type="button"
+            kind="ghost"
+            className={clsx(
+              "-my-1 flex size-6 shrink-0 items-center justify-center rounded-md transition-[opacity,background,color] duration-150 ease-fluid hover:bg-white/[0.08]",
+              muted
+                ? "text-red opacity-100"
+                : "text-muted opacity-70 group-hover:opacity-100 hover:text-content",
+            )}
+            title={muted ? "Unmute on MIDI track" : "Mute on MIDI track"}
+            aria-pressed={muted}
+            onClick={onToggleMute}
+          >
+            {muted ? <IconSoundOff /> : <IconSound />}
+          </Button>
+        </div>
       </div>
+      {onMergeInto && mergeTargets.length > 0 && (
+        <div className="flex items-center justify-end opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <select
+            aria-label={`Merge ${label(name)} into another instrument`}
+            className="rounded border border-line bg-bg px-1.5 py-0.5 text-[11px] text-faint outline-none hover:text-content focus:border-accent"
+            value=""
+            onChange={(e) => {
+              if (e.target.value) onMergeInto(e.target.value);
+            }}
+          >
+            <option value="">Merge into…</option>
+            {mergeTargets.map((target) => (
+              <option key={target} value={target}>
+                → {label(target)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
     </li>
   );
 }
@@ -112,9 +151,28 @@ export function InstrumentList(props: {
   given: Set<string>;
   audio: AudioEngine;
   rollRef: RefObject<PianoRoll | null>;
+  muted?: Set<string>;
+  onMutedChange?: (next: Set<string>) => void;
+  noteCounts?: Record<string, number>;
+  onMergeInstrument?: (source: string, target: string) => void;
 }) {
-  const { instruments, given, audio, rollRef } = props;
-  const [muted, setMuted] = useState<Set<string>>(() => new Set());
+  const {
+    instruments,
+    given,
+    audio,
+    rollRef,
+    muted: controlledMuted,
+    onMutedChange,
+    noteCounts,
+    onMergeInstrument,
+  } = props;
+  const [localMuted, setLocalMuted] = useState<Set<string>>(() => new Set());
+  const muted = controlledMuted ?? localMuted;
+  const setMuted = (updater: (prev: Set<string>) => Set<string>) => {
+    const next = updater(muted);
+    if (onMutedChange) onMutedChange(next);
+    else setLocalMuted(next);
+  };
   const [soloed, setSoloed] = useState<string | null>(null);
 
   // Keep the audio engine and piano roll in sync with the muted set.
@@ -138,10 +196,10 @@ export function InstrumentList(props: {
   const toggleSolo = (name: string) => {
     if (soloed === name) {
       setSoloed(null);
-      setMuted(new Set());
+      setMuted(() => new Set());
     } else {
       setSoloed(name);
-      setMuted(new Set(instruments.filter((other) => other !== name)));
+      setMuted(() => new Set(instruments.filter((other) => other !== name)));
     }
   };
 
@@ -149,6 +207,9 @@ export function InstrumentList(props: {
     <InstrumentRow
       key={name}
       name={name}
+      noteCount={noteCounts?.[name]}
+      mergeTargets={instruments.filter((other) => other !== name && other !== "drums" && name !== "drums")}
+      onMergeInto={onMergeInstrument ? (target) => onMergeInstrument(name, target) : undefined}
       muted={muted.has(name)}
       soloed={soloed === name}
       onToggleMute={() => toggleMute(name)}

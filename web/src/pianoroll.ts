@@ -313,9 +313,80 @@ export class PianoRoll {
   private contentDuration = 0;
   /** Detected beat grid; null until the final `midi` event arrives (then: seconds grid). */
   private beatGrid: BeatGrid | null = null;
+  /** Selected note ids in Edit mode. */
+  private selectedIds: ReadonlySet<number> = new Set();
+  /** Active marquee selection rectangle (canvas px), or null. */
+  private marquee: { x0: number; y0: number; x1: number; y1: number } | null = null;
 
   get pxPerSec(): number {
     return this._pxPerSec;
+  }
+
+  setSelectedIds(ids: ReadonlySet<number>) {
+    this.selectedIds = ids;
+  }
+
+  setMarquee(rect: { x0: number; y0: number; x1: number; y1: number } | null) {
+    this.marquee = rect;
+  }
+
+  private pitchMetrics(): { rowH: number; pitchTop: number } {
+    const H = this.canvas.getBoundingClientRect().height || 420;
+    const rowH = this.pxPerPitch ?? H / DEFAULT_PITCH_RANGE;
+    const pitchTop = this.pxPerPitch === null ? DEFAULT_PITCH_TOP : this.pitchTop;
+    return { rowH, pitchTop };
+  }
+
+  /** Translate a canvas-relative y pixel coordinate to a MIDI pitch (clamped [A0, C8]). */
+  yToPitch(y: number): number {
+    const { rowH, pitchTop } = this.pitchMetrics();
+    const raw = Math.ceil(pitchTop - y / rowH);
+    return Math.max(PITCH_MIN, Math.min(PITCH_MAX, raw));
+  }
+
+  /** Hit-test visible notes at canvas-relative `(x, y)` (topmost/latest wins). */
+  hitTestNote(x: number, y: number): { id: number; edge: "body" | "right" } | null {
+    if (x < KEY_WIDTH) return null;
+    const { rowH, pitchTop } = this.pitchMetrics();
+    const rowGap = Math.max(0.5, Math.min(4, rowH * 0.1));
+    const maxShift = Math.min(3, Math.max(0, rowGap - 1));
+    const barH = Math.max(4, rowH - rowGap);
+    for (let i = this.notes.length - 1; i >= 0; i--) {
+      const n = this.notes[i];
+      if (n.id === undefined || this.hiddenInstruments.has(n.instrument)) continue;
+      if (n.pitch < PITCH_MIN || n.pitch > PITCH_MAX) continue;
+      const nx = KEY_WIDTH + (n.start - this.lastOffset) * this._pxPerSec;
+      const nw = Math.max(4, (n.end - n.start) * this._pxPerSec - NOTE_GAP_PX);
+      const shift = Math.min((n.stackOffset ?? 0) * NOTE_STACK_PX, maxShift);
+      const ny = (pitchTop - n.pitch) * rowH - shift;
+      if (x >= nx && x <= nx + nw && y >= ny - 1 && y <= ny + barH + 1) {
+        const edge: "body" | "right" = nw >= 10 && x >= nx + nw - 6 ? "right" : "body";
+        return { id: n.id, edge };
+      }
+    }
+    return null;
+  }
+
+  /** Return ids of all visible notes intersecting canvas rectangle `(x0,y0)-(x1,y1)`. */
+  notesInRect(x0: number, y0: number, x1: number, y1: number): number[] {
+    const left = Math.min(x0, x1);
+    const right = Math.max(x0, x1);
+    const top = Math.min(y0, y1);
+    const bottom = Math.max(y0, y1);
+    const { rowH, pitchTop } = this.pitchMetrics();
+    const rowGap = Math.max(0.5, Math.min(4, rowH * 0.1));
+    const barH = Math.max(2, rowH - rowGap);
+    const out: number[] = [];
+    for (const n of this.notes) {
+      if (n.id === undefined || this.hiddenInstruments.has(n.instrument)) continue;
+      const nx = KEY_WIDTH + (n.start - this.lastOffset) * this._pxPerSec;
+      const nw = Math.max(2, (n.end - n.start) * this._pxPerSec - NOTE_GAP_PX);
+      const ny = (pitchTop - n.pitch) * rowH;
+      if (nx + nw >= left && nx <= right && ny + barH >= top && ny <= bottom) {
+        out.push(n.id);
+      }
+    }
+    return out;
   }
 
   constructor(canvas: HTMLCanvasElement) {
@@ -469,6 +540,8 @@ export class PianoRoll {
     this.pitchTop = DEFAULT_PITCH_TOP;
     this.contentDuration = 0;
     this.beatGrid = null;
+    this.selectedIds = new Set();
+    this.marquee = null;
   }
 
   /**
@@ -788,18 +861,42 @@ export class PianoRoll {
       if (y + rowH < 0 || y > H) continue;
       // Muting dims a track; while an instrument is highlighted (hovered in
       // the instrument list), every other track fades even further back.
-      let alpha = this.mutedInstruments.has(n.instrument) ? 0.2 : 1;
+      // Velocity modulates opacity subtly so dynamics are readable at a glance.
+      const vel = Math.max(1, Math.min(127, n.velocity ?? 100));
+      const velAlpha = 0.42 + 0.58 * (vel / 127);
+      let alpha = this.mutedInstruments.has(n.instrument) ? 0.2 : velAlpha;
       if (
         this.highlightedInstrument !== null &&
         n.instrument !== this.highlightedInstrument
       ) {
         alpha = Math.min(alpha, 0.15);
       }
+      const isSelected = n.id !== undefined && this.selectedIds.has(n.id);
+      if (isSelected) alpha = 1;
+      const barH = Math.max(2, rowH - rowGap);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = instrumentColor(n.instrument);
-      ctx.fillRect(x, y, w, Math.max(2, rowH - rowGap));
+      ctx.fillRect(x, y, w, barH);
+      if (isSelected) {
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1, w - 1), Math.max(1, barH - 1));
+      }
     }
     ctx.globalAlpha = 1;
+
+    // Marquee selection rectangle in Edit mode.
+    if (this.marquee) {
+      const mx = Math.min(this.marquee.x0, this.marquee.x1);
+      const my = Math.min(this.marquee.y0, this.marquee.y1);
+      const mw = Math.abs(this.marquee.x1 - this.marquee.x0);
+      const mh = Math.abs(this.marquee.y1 - this.marquee.y0);
+      ctx.fillStyle = "rgba(125, 138, 255, 0.18)";
+      ctx.fillRect(mx, my, mw, mh);
+      ctx.strokeStyle = "rgba(125, 138, 255, 0.85)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(mx + 0.5, my + 0.5, mw, mh);
+    }
 
     // Playhead
     const px = KEY_WIDTH + (this.playhead - offsetSec) * pxPerSec;

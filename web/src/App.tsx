@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import type { PianoRoll } from "./pianoroll";
+import { EditorHistory, mergeInstrument, type EditableNote } from "./editor";
 import { useAudioEngine } from "./hooks/useAudioEngine";
 import {
   useTranscription,
@@ -104,6 +105,14 @@ export function App() {
   const [studioConfig, setStudioConfig] = useState<StudioConfig>(DEFAULT_STUDIO_CONFIG);
   const [stageMessage, setStageMessage] = useState<string | null>(null);
   const [referenceSource, setReferenceSource] = useState<string>("mix");
+  const [editedNotes, setEditedNotes] = useState<EditableNote[]>([]);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  const [mutedInstruments, setMutedInstruments] = useState<Set<string>>(() => new Set());
+  const historyRef = useRef<EditorHistory | null>(null);
+  const history = (historyRef.current ??= new EditorHistory(50));
+  const [, setHistoryTick] = useState(0);
+  // Pre-drag snapshot stored on first preview call so drag commits push original state once.
+  const dragOriginRef = useRef<EditableNote[] | null>(null);
   // True while a file is being dragged over the window. On the welcome screen
   // this swaps the panel's prompt in place instead of showing the overlay.
   const [dragging, setDragging] = useState(false);
@@ -389,8 +398,111 @@ export function App() {
 
   // A new run starts from what it detects, not from the last file's corrections.
   useEffect(() => {
-    if (result === null) setTiming(NO_OVERRIDES);
-  }, [result]);
+    if (result === null) {
+      setTiming(NO_OVERRIDES);
+      setEditedNotes([]);
+      setSelectedIds(new Set());
+      setMutedInstruments(new Set());
+      history.clear();
+      dragOriginRef.current = null;
+      setHistoryTick((t) => t + 1);
+      return;
+    }
+    const initial: EditableNote[] = result.notes.map((n, i) => ({
+      id: n.id ?? i,
+      instrument: n.instrument,
+      pitch: n.pitch,
+      start: n.start,
+      end: n.end,
+      velocity: n.velocity ?? 100,
+    }));
+    setEditedNotes(initial);
+    setSelectedIds(new Set());
+    history.clear();
+    dragOriginRef.current = null;
+    setHistoryTick((t) => t + 1);
+  }, [result, history]);
+
+  function syncRollAndAudio(next: EditableNote[]) {
+    setEditedNotes(next);
+    rollRef.current?.replaceNotes(
+      next.map((n) => ({
+        id: n.id,
+        instrument: n.instrument,
+        pitch: n.pitch,
+        start: n.start,
+        end: n.end,
+        velocity: n.velocity,
+      })),
+    );
+    audio.replaceNotes(next);
+    // Keep instrument list in sync when tracks are merged or emptied.
+    const seen = new Set<string>();
+    const nextInsts: string[] = [];
+    for (const n of next) {
+      if (!seen.has(n.instrument)) {
+        seen.add(n.instrument);
+        nextInsts.push(n.instrument);
+      }
+    }
+    setInstruments(nextInsts);
+  }
+
+  function handlePreviewNotes(next: EditableNote[]) {
+    if (dragOriginRef.current === null) {
+      dragOriginRef.current = editedNotes.map((n) => ({ ...n }));
+    }
+    setEditedNotes(next);
+    rollRef.current?.replaceNotes(
+      next.map((n) => ({
+        id: n.id,
+        instrument: n.instrument,
+        pitch: n.pitch,
+        start: n.start,
+        end: n.end,
+        velocity: n.velocity,
+      })),
+    );
+  }
+
+  function handleCommitNotes(next: EditableNote[], pushHistory = true) {
+    if (pushHistory) {
+      const prev = dragOriginRef.current ?? editedNotes;
+      history.push(prev);
+      setHistoryTick((t) => t + 1);
+    }
+    dragOriginRef.current = null;
+    syncRollAndAudio(next);
+  }
+
+  function handleUndo() {
+    const prev = history.undo(editedNotes);
+    if (!prev) return;
+    dragOriginRef.current = null;
+    setSelectedIds(new Set());
+    setHistoryTick((t) => t + 1);
+    syncRollAndAudio(prev);
+  }
+
+  function handleRedo() {
+    const next = history.redo(editedNotes);
+    if (!next) return;
+    dragOriginRef.current = null;
+    setSelectedIds(new Set());
+    setHistoryTick((t) => t + 1);
+    syncRollAndAudio(next);
+  }
+
+  function handleMergeInstrument(source: string, target: string) {
+    const merged = mergeInstrument(editedNotes, source, target);
+    handleCommitNotes(merged, true);
+  }
+
+  const noteCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const n of editedNotes) counts[n.instrument] = (counts[n.instrument] ?? 0) + 1;
+    return counts;
+  }, [editedNotes]);
 
   // Redraw the roll's bar lines on the corrected grid. The notes were moved onto
   // the detected beats once, when the grid arrived; this only moves bar lines.
@@ -510,13 +622,37 @@ export function App() {
             }}
           />
 
-          <PianoRollCanvas rollRef={rollRef} audio={audio} setUserScrolled={setUserScrolled} />
+          <PianoRollCanvas
+            rollRef={rollRef}
+            audio={audio}
+            setUserScrolled={setUserScrolled}
+            editable={appState === "done" && result !== null}
+            notes={editedNotes}
+            instruments={instruments}
+            selectedIds={selectedIds}
+            onSelectIds={setSelectedIds}
+            onPreviewNotes={handlePreviewNotes}
+            onCommitNotes={handleCommitNotes}
+            canUndo={history.canUndo}
+            canRedo={history.canRedo}
+            onUndo={handleUndo}
+            onRedo={handleRedo}
+          />
 
           {/* Sidebar column: the instrument list, with the feedback line pinned
               to the bottom of the column so it doesn't move as instruments
               come in. */}
           <div className="col-start-2 flex flex-col gap-3 max-[760px]:col-start-1">
-            <InstrumentList instruments={instruments} given={condSelected} audio={audio} rollRef={rollRef} />
+            <InstrumentList
+              instruments={instruments}
+              given={condSelected}
+              audio={audio}
+              rollRef={rollRef}
+              muted={mutedInstruments}
+              onMutedChange={setMutedInstruments}
+              noteCounts={result ? noteCounts : undefined}
+              onMergeInstrument={result ? handleMergeInstrument : undefined}
+            />
             {result && (
               <TimingPanel
                 detected={result.beatGrid}
