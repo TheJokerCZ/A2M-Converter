@@ -302,6 +302,7 @@ def note_event2midi(
     to_tick: Callable[[float], int] | None = None,
     tempo_changes: list[tuple[int, int]] | None = None,
     drum_length: float = 0.01,
+    split_drums: bool = False,
 ) -> MidiFile:
     """Convert NoteEvent list to a type-1 (multi-track) MIDI file.
 
@@ -363,10 +364,16 @@ def note_event2midi(
     sort_note_events(note_events)
 
     program_names = program_names or {}
-    program_to_channel: dict[int, int] = {}
+    program_to_channel: dict[int | tuple[str, str], int] = {}
     available_channels = list(range(0, 9)) + list(range(10, 16))
     # Each track's note messages at their absolute ticks; deltas come last.
-    tracks: dict[int, list[tuple[int, Message]]] = {}
+    tracks: dict[int | tuple[str, str], list[tuple[int, Message]]] = {}
+    if split_drums:
+        from muscriptor.utils.cleanup import (
+            DRUM_LANE_LABELS,
+            DRUM_LANE_ORDER,
+            drum_lane_for_pitch,
+        )
     current_tick = 0
     for ne in note_events:
         absolute_tick = to_tick(ne.time)
@@ -376,10 +383,15 @@ def note_event2midi(
             )
         current_tick = absolute_tick
 
-        key = DRUM_PROGRAM if (ne.is_drum or ne.program == DRUM_PROGRAM) else ne.program
+        is_drum = ne.is_drum or ne.program == DRUM_PROGRAM
+        if is_drum and split_drums:
+            key: int | tuple[str, str] = ("drum_lane", drum_lane_for_pitch(ne.pitch))
+        else:
+            key = DRUM_PROGRAM if is_drum else ne.program
+
         if key not in tracks:
             tracks[key] = []
-            if key == DRUM_PROGRAM:
+            if is_drum:
                 ne_channel = 9
             else:
                 try:
@@ -404,11 +416,26 @@ def note_event2midi(
             )
         )
 
-    for key, messages in tracks.items():
+    if split_drums:
+        non_drum_keys = [k for k in tracks if not isinstance(k, tuple)]
+        drum_keys = [
+            ("drum_lane", lane)
+            for lane in DRUM_LANE_ORDER
+            if ("drum_lane", lane) in tracks
+        ]
+        ordered_keys = non_drum_keys + drum_keys
+    else:
+        ordered_keys = list(tracks.keys())
+
+    for key in ordered_keys:
+        messages = tracks[key]
         track = MidiTrack()
         midi.tracks.append(track)
         ne_channel = program_to_channel[key]
-        if key == DRUM_PROGRAM:
+        if isinstance(key, tuple):
+            name = DRUM_LANE_LABELS[key[1]]
+            gm_program = 0
+        elif key == DRUM_PROGRAM:
             name = program_names.get(key, "drums")
             gm_program = 0
         else:

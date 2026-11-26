@@ -5,6 +5,7 @@ import dataclasses
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Mapping
 
 import numpy as np
 
@@ -15,6 +16,7 @@ from muscriptor.tokenizer.notes import (
     trim_overlapping_notes,
 )
 from muscriptor.utils.beats import BeatGrid, Onsets, estimate_onset_delay, fit_tempo
+from muscriptor.utils.cleanup import cleanup_notes
 
 logger = logging.getLogger(__name__)
 
@@ -57,11 +59,45 @@ class ExportOptions:
     # Drop the empty bars before the first note. The MIDI then no longer starts
     # where the audio does.
     trim_leading_bars: bool = False
+    # Preserve audio-derived per-note velocities (False flattens to 100).
+    use_velocities: bool = True
+    # Dynamic range scaling around midpoint velocity (1.0 = unchanged).
+    velocity_scale: float = 1.0
+    # Drop non-drum notes shorter than this many milliseconds (0 = off).
+    min_note_duration_ms: float = 0.0
+    # Drop notes with velocity below this floor (1 = off).
+    min_velocity: int = 1
+    # Merge same-(instrument, pitch) hits closer than this many milliseconds (0 = off).
+    deduplicate_ms: float = 0.0
+    # Split GM drums into 6 FL Studio lanes (Kick, Snare, Hi-Hat, Toms, Cymbals, Perc).
+    split_drums: bool = False
+    # Canonical instrument names to exclude from export.
+    excluded_instruments: tuple[str, ...] = ()
+    # Mapping of source instrument name → destination instrument name.
+    instrument_remap: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self):
         if self.beat_scale <= 0 or not math.log2(self.beat_scale).is_integer():
             raise ValueError(
                 f"beat_scale must be a power of two, not {self.beat_scale}"
+            )
+        if not isinstance(self.excluded_instruments, tuple):
+            object.__setattr__(
+                self, "excluded_instruments", tuple(self.excluded_instruments)
+            )
+        if isinstance(self.instrument_remap, Mapping):
+            object.__setattr__(
+                self,
+                "instrument_remap",
+                tuple((str(k), str(v)) for k, v in self.instrument_remap.items()),
+            )
+        elif self.instrument_remap is None:
+            object.__setattr__(self, "instrument_remap", ())
+        elif not isinstance(self.instrument_remap, tuple):
+            object.__setattr__(
+                self,
+                "instrument_remap",
+                tuple((str(k), str(v)) for k, v in self.instrument_remap),
             )
 
 
@@ -376,6 +412,28 @@ def notes_to_midi(
     find; the notes are then written unquantized.
     """
     options = options or ExportOptions()
+    has_cleanup = (
+        options.min_note_duration_ms > 0.0
+        or options.min_velocity > 1
+        or options.deduplicate_ms > 0.0
+        or bool(options.excluded_instruments)
+        or bool(options.instrument_remap)
+        or not options.use_velocities
+        or options.velocity_scale != 1.0
+    )
+    if has_cleanup:
+        notes, program_names = cleanup_notes(
+            notes,
+            min_note_duration_ms=options.min_note_duration_ms,
+            min_velocity=options.min_velocity,
+            deduplicate_ms=options.deduplicate_ms,
+            excluded_instruments=options.excluded_instruments,
+            instrument_remap=options.instrument_remap,
+            use_velocities=options.use_velocities,
+            velocity_scale=options.velocity_scale,
+            program_names=program_names,
+        )
+
     grid = resolve_grid(beat_grid, options, [n.onset for n in notes])
     delay = grid.onset_delay
     notes = shifted_notes(notes, -delay)
@@ -416,6 +474,7 @@ def notes_to_midi(
         to_tick=lambda beats: round(beats * TICKS_PER_BEAT),
         tempo_changes=timeline.tempo_changes(TICKS_PER_BEAT),
         drum_length=DRUM_HIT_BEATS,
+        split_drums=options.split_drums,
     )
 
 
