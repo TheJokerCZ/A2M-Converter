@@ -6,10 +6,11 @@ import { FlExportDialog } from "./FlExportDialog";
 import { MidiExportDialog } from "./MidiExportDialog";
 import { SheetsDialog, type SheetFile } from "./SheetsDialog";
 import type { TranscriptionResult } from "../hooks/useTranscription";
-import type { EditableNote } from "../editor";
+import { notesFingerprint, type EditableNote } from "../editor";
 import { IconChevron, IconDownload } from "./icons";
 import { track } from "../analytics";
 import {
+  NO_OVERRIDES,
   correctedGrid,
   DEFAULT_CLEANUP,
   errorDetail,
@@ -111,9 +112,19 @@ export function OutputBar(props: {
     track("download", { format: mode === "mix" ? "wav_mix" : "wav_synth" });
     setBusy("Synthesizing…");
     try {
+      const activeNotes = notes ?? result.notes;
+      // Rebuild MIDI from current (possibly edited) notes with real velocities
+      // on the original detected grid (unquantized) so mix alignment stays exact.
+      const midiForSynth = await exportMidi(
+        activeNotes,
+        result.beatGrid,
+        NO_OVERRIDES,
+        { ...DEFAULT_CLEANUP, quantize: false, fill_gaps: 0 },
+        true,
+      );
       const form = new FormData();
       form.append("mode", mode);
-      form.append("midi", result.midi, "transcription.mid");
+      form.append("midi", midiForSynth, "transcription.mid");
       if (mode === "mix") form.append("audio", currentFile);
       const resp = await fetch("/auralize", { method: "POST", body: form });
       if (!resp.ok) throw new Error(await errorDetail(resp));
@@ -135,17 +146,21 @@ export function OutputBar(props: {
     }
   }
 
-  // Engraves the transcription as notation (MuseScore, server-side). That takes
-  // long enough that it is done in bulk: one request renders the whole set —
-  // MusicXML, the full score, a PDF per instrument, tablature for the fretted
-  // ones — and answers with an uncompressed zip. Unpacking it here means the
-  // user picks files out of something the browser already has, with no further
-  // round trip and no archive to open by hand.
   async function downloadSheets() {
     if (result === null) return;
     track("download", { format: "sheets" });
-    // Already engraved at this tempo — just show the picker again.
-    const timingKey = JSON.stringify(timing);
+    const activeNotes: EditableNote[] =
+      notes ??
+      result.notes.map((n, i) => ({
+        id: n.id ?? i,
+        instrument: n.instrument,
+        pitch: n.pitch,
+        start: n.start,
+        end: n.end,
+        velocity: n.velocity ?? 100,
+      }));
+    // Cache key includes both timing overrides AND current edited-note fingerprint.
+    const timingKey = JSON.stringify(timing) + "::" + notesFingerprint(activeNotes);
     if (sheets !== null && sheets.timingKey === timingKey) {
       setSheetsOpen(true);
       return;

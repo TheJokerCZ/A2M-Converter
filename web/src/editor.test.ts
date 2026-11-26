@@ -4,8 +4,10 @@ import {
   EditorHistory,
   addNote,
   deleteNotes,
+  getGridSelectOptions,
   mergeInstrument,
   moveNotes,
+  notesFingerprint,
   resizeNote,
   setNotesVelocity,
   toExportPayload,
@@ -97,4 +99,22 @@ test("moveNotes, resizeNote, deleteNotes, addNote, and setNotesVelocity clamp cl
 
   const velClamped = setNotesVelocity(sampleNotes(), new Set([1]), -10);
   assert.equal(velClamped[0].velocity, 1);
+});
+
+test("getGridSelectOptions always includes an Auto option matching fallback 1/16 when autoGrid is null", () => {
+  const nullOpts = getGridSelectOptions(null);
+  assert.equal(nullOpts[0].value, "");
+  assert.equal(nullOpts[0].label, "Auto (1/16)");
+
+  const tripletOpts = getGridSelectOptions(3);
+  assert.equal(tripletOpts[0].value, "");
+  assert.equal(tripletOpts[0].label, "Auto (1/8 triplets)");
+});
+
+test("notesFingerprint changes when notes are deleted, moved, or velocity-edited", () => {
+  const base = sampleNotes();
+  const fp0 = notesFingerprint(base);
+  assert.notEqual(notesFingerprint(deleteNotes(base, new Set([2]))), fp0);
+  assert.notEqual(notesFingerprint(moveNotes(base, new Set([1]), 0.1, 0)), fp0);
+  assert.notEqual(notesFingerprint(setNotesVelocity(base, new Set([1]), 110)), fp0);
 });

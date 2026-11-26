@@ -363,3 +363,57 @@ def test_export_fl_bundle_returns_zip_with_aligned_stems(tmp_path):
         assert "stems/drums.wav" in names
         assert "stems/other.wav" in names
         assert "README_FL_STUDIO.txt" in names
+
+
+def test_studio_velocity_uses_onset_delay_corrected_times(tmp_path):
+    """Crisp 8 ms drum transients must still be measured when model onsets lag by 38 ms."""
+    sr = 44100
+    n = sr * 2
+    t = torch.arange(n, dtype=torch.float32) / sr
+    drums_wav = torch.zeros(2, n, dtype=torch.float32)
+    # 3 crisp 8 ms hi-hat hits at exact audio times 0.2s (soft), 0.7s (medium), 1.2s (loud)
+    for hit_t, amp in [(0.2, 0.08), (0.7, 0.35), (1.2, 0.95)]:
+        i0, i1 = int(hit_t * sr), int((hit_t + 0.008) * sr)
+        drums_wav[:, i0:i1] = (amp * torch.sin(2.0 * math.pi * 8000.0 * t[i0:i1])).unsqueeze(0)
+
+    stub_model = _make_stub_model()
+    # Grid reports 38 ms onset delay (within MAX_ONSET_DELAY_S = 0.040 s).
+    # Note: make_stub_model uses a BeatGrid with beats=None; with_onset_delay()
+    # keeps existing onset_delay only if we override it or pass beats.
+    grid = BeatGrid(
+        bpm=120.0,
+        beats_per_bar=4,
+        first_downbeat=0.2,
+        onset_delay=0.038,
+        beat_subdivision=4,
+        steady=True,
+    )
+    stub_model.detect_beat_grid_for.return_value = grid
+    # Preserve the measured onset_delay (simulate beat_this + with_onset_delay result).
+    grid.with_onset_delay = lambda _onsets: grid  # type: ignore[method-assign]
+
+    def _late_transcribe(audio, **kwargs):
+        for idx, hit_t in enumerate([0.2, 0.7, 1.2]):
+            s = NoteStartEvent(pitch=42, start_time=hit_t + 0.038, index=idx, instrument="drums")
+            yield s
+            yield NoteEndEvent(end_time=hit_t + 0.050, start_event=s)
+
+    stub_model.transcribe.side_effect = _late_transcribe
+
+    app = create_app(
+        model=stub_model,
+        session_store=SessionStore(root_dir=tmp_path / "sessions"),
+    )
+    client = TestClient(app)
+    resp = client.post(
+        "/transcribe",
+        files={"file": ("hats.wav", write_pcm16_wav_bytes(drums_wav, sr), "audio/wav")},
+        data={"studio": "true", "separation": "none"},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    complete = events[-1]
+    assert complete["type"] == "transcription_complete"
+    vels = complete["velocities"]
+    assert vels["2"] - vels["0"] >= 40
+    assert vels["0"] < vels["1"] < vels["2"]

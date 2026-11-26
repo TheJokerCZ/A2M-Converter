@@ -3,7 +3,11 @@ import clsx from "clsx";
 import { Button } from "./Button";
 import { IconDownload } from "./icons";
 import type { TranscriptionResult } from "../hooks/useTranscription";
-import type { EditableNote } from "../editor";
+import {
+  FALLBACK_GRID,
+  getGridSelectOptions,
+  type EditableNote,
+} from "../editor";
 import {
   FL_PRESET_DEFAULTS,
   correctedGrid,
@@ -18,16 +22,6 @@ import {
 } from "../export";
 
 const STORAGE_KEY = "flStudioExportSettings";
-
-const GRIDS: { value: number; label: string }[] = [
-  { value: 1, label: "1/4" },
-  { value: 2, label: "1/8" },
-  { value: 3, label: "1/8 triplets" },
-  { value: 4, label: "1/16" },
-  { value: 6, label: "1/16 triplets" },
-  { value: 8, label: "1/32" },
-];
-const FALLBACK_GRID = 4;
 
 const SELECT =
   "rounded-md border border-line-strong bg-surface-2 px-2 py-1 text-[13px] text-content outline-none focus:border-accent disabled:opacity-50";
@@ -232,10 +226,9 @@ export function FlExportDialog(props: {
                       update({ subdivision: e.target.value ? Number(e.target.value) : null })
                     }
                   >
-                    {autoGrid !== null && <option value="">Auto (1/{autoGrid * 4})</option>}
-                    {GRIDS.map((g) => (
-                      <option key={g.value} value={g.value}>
-                        {g.label}
+                    {getGridSelectOptions(autoGrid).map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
                       </option>
                     ))}
                   </select>

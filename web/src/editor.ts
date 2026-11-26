@@ -179,3 +179,43 @@ export function toExportPayload(
     beatGrid: beatGrid ? { ...beatGrid, onset_delay: 0 } : null,
   };
 }
+
+const GRID_LABELS: ReadonlyArray<{ value: number; label: string }> = [
+  { value: 1, label: "1/4" },
+  { value: 2, label: "1/8" },
+  { value: 3, label: "1/8 triplets" },
+  { value: 4, label: "1/16" },
+  { value: 6, label: "1/16 triplets" },
+  { value: 8, label: "1/32" },
+];
+
+export const FALLBACK_GRID = 4;
+
+export function formatGridLabel(steps: number): string {
+  return GRID_LABELS.find((g) => g.value === steps)?.label ?? `1/${steps} beat`;
+}
+
+/**
+ * Grid `<select>` options for export dialogs. Always includes a `""` Auto entry
+ * whose label matches the actual subdivision that will be exported (`autoGrid`
+ * or `FALLBACK_GRID = 4` = 1/16), so the `<select>` never falls back to "1/4".
+ */
+export function getGridSelectOptions(
+  autoGrid: number | null,
+): Array<{ value: string; label: string }> {
+  const effective = autoGrid ?? FALLBACK_GRID;
+  return [
+    { value: "", label: `Auto (${formatGridLabel(effective)})` },
+    ...GRID_LABELS.map((g) => ({ value: String(g.value), label: g.label })),
+  ];
+}
+
+/** Stable fingerprint of an editable note list for export/sheet cache invalidation. */
+export function notesFingerprint(notes: readonly EditableNote[]): string {
+  return notes
+    .map(
+      (n) =>
+        `${n.id}:${n.instrument}:${n.pitch}:${Math.round(n.start * 1000)}:${Math.round(n.end * 1000)}:${n.velocity}`,
+    )
+    .join("|");
+}

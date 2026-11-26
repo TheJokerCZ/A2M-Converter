@@ -130,8 +130,8 @@ class LMModel(nn.Module):
             dtype=dtype,
             **kwargs,
         )
-        self.out_norm = nn.LayerNorm(dim, eps=1e-5)
-        self.linear = nn.Linear(dim, card, bias=False)
+        self.out_norm = nn.LayerNorm(dim, eps=1e-5, device=device, dtype=dtype)
+        self.linear = nn.Linear(dim, card, bias=False, device=device, dtype=dtype)
 
     # ------------------------------------------------------------------
     # Token ID properties

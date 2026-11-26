@@ -181,3 +181,118 @@ def test_cli_serve_starts_lazily_without_loading_model(monkeypatch):
     assert captured["model"] is None
     assert isinstance(captured["model_manager"], ModelManager)
     assert captured["port"] == 9123
+
+
+def test_cli_separation_with_json_does_not_double_transcribe(monkeypatch, tmp_path):
+    import json
+
+    audio_path = _write_tone_wav(tmp_path / "song.wav")
+    out_json = tmp_path / "out.json"
+    model = _make_stub_model()
+    load_calls = {"n": 0}
+
+    def _fake_sep(wav, sr, mode="stems_4", device=None, segment=7.5):
+        out_sr = 44100
+        t = torch.arange(out_sr, dtype=torch.float32) / out_sr
+        drums = (0.7 * torch.sin(2.0 * math.pi * 70.0 * t)).repeat(2, 1)
+        return {"drums": (drums, out_sr)}
+
+    def _fake_transcribe(audio, **kwargs):
+        s0 = NoteStartEvent(pitch=36, start_time=0.1, index=0, instrument="drums")
+        yield s0
+        yield NoteEndEvent(end_time=0.12, start_event=s0)
+
+    def _fake_load(*a, **kw):
+        load_calls["n"] += 1
+        return model
+
+    model.transcribe.side_effect = _fake_transcribe
+    monkeypatch.setattr(main_mod, "_load_model", _fake_load)
+    monkeypatch.setattr(main_mod, "separate_stems", _fake_sep)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        main_mod.app,
+        [
+            "transcribe",
+            str(audio_path),
+            "--separation",
+            "stems_4",
+            "--stems",
+            "drums",
+            "-f",
+            "json",
+            "-o",
+            str(out_json),
+        ],
+    )
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert load_calls["n"] == 1
+    assert model.transcribe.call_count == 1
+    data = json.loads(out_json.read_text())
+    assert len(data) == 2
+    assert data[0]["instrument"] == "drums"
+
+
+def test_cli_estimate_velocity_midi_runs_auralize(monkeypatch, tmp_path):
+    audio_path = _write_tone_wav(tmp_path / "song.wav")
+    out_mid = tmp_path / "out.mid"
+    out_aur = tmp_path / "mix.wav"
+    model = _make_stub_model()
+    auralized = {"called": False}
+
+    def _fake_transcribe(audio, **kwargs):
+        s0 = NoteStartEvent(pitch=69, start_time=0.1, index=0, instrument="acoustic_piano")
+        yield s0
+        yield NoteEndEvent(end_time=0.5, start_event=s0)
+
+    model.transcribe.side_effect = _fake_transcribe
+    monkeypatch.setattr(main_mod, "_load_model", lambda *a, **kw: model)
+
+    import muscriptor.utils.auralization as aur_mod
+
+    monkeypatch.setattr(
+        aur_mod,
+        "auralize",
+        lambda **kw: auralized.__setitem__("called", True),
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(
+        main_mod.app,
+        [
+            "transcribe",
+            str(audio_path),
+            "--estimate-velocity",
+            "-f",
+            "midi",
+            "-o",
+            str(out_mid),
+            "--auralize",
+            str(out_aur),
+        ],
+    )
+    assert res.exit_code == 0, res.stderr + res.stdout
+    assert out_mid.is_file()
+    assert auralized["called"] is True
+
+
+def test_cli_missing_demucs_exits_cleanly(monkeypatch, tmp_path):
+    from muscriptor.utils.stems import StemSeparationUnavailableError
+
+    audio_path = _write_tone_wav(tmp_path / "song.wav")
+
+    def _missing_sep(*a, **kw):
+        raise StemSeparationUnavailableError("Install demucs-infer")
+
+    monkeypatch.setattr(main_mod, "separate_stems", _missing_sep)
+
+    runner = CliRunner()
+    res = runner.invoke(
+        main_mod.app,
+        ["transcribe", str(audio_path), "--separation", "stems_4"],
+    )
+    assert res.exit_code == 1
+    assert "Error:" in res.stderr
+    assert "demucs-infer" in res.stderr
+    assert res.exception is None or isinstance(res.exception, SystemExit)

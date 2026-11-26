@@ -149,7 +149,7 @@ def _drum_energy_db(note: Note, analysis: _StemAnalysis) -> float:
     hi_bin = min(n_bins - 1, max(lo_bin, int(math.ceil(hi_hz / bin_hz))))
 
     frames = _frame_slice(
-        note.onset - 0.005, note.onset + 0.035, analysis.sr, hop, n_frames
+        note.onset - 0.015, note.onset + 0.035, analysis.sr, hop, n_frames
     )
     band = mag[lo_bin : hi_bin + 1, frames]
     # RMS across frequency bins per frame, then peak across the transient window.

@@ -209,6 +209,7 @@ def _auto_dtype(device: torch.device, cfg: _ModelConfig) -> torch.dtype:
 def _build_model(
     device: torch.device,
     cfg: _ModelConfig = _DEFAULT_CONFIG,
+    dtype: torch.dtype = torch.float32,
     autocast_dtype: torch.dtype = torch.float16,
 ) -> LMModel:
     mel_cond = MelSpectrogramConditioner(
@@ -254,7 +255,10 @@ def _build_model(
         num_layers=cfg.num_layers,
         max_period=10000,
         device=device,
+        dtype=dtype,
     )
+    # Conditioners stay fp32 (log-mel of quiet passages underflows in fp16).
+    model.condition_provider.float()
     return model
 
 
@@ -343,18 +347,19 @@ class TranscriptionModel:
             dtype = getattr(torch, dtype)
 
         autocast_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
-        model = _build_model(device, cfg, autocast_dtype=autocast_dtype)
+        model = _build_model(device, cfg, dtype=dtype, autocast_dtype=autocast_dtype)
         model.eval()
 
-        state_dict = load_file(weights_path, device=str(device))
+        # Load checkpoint into CPU RAM first so load_state_dict copies/casts
+        # tensor-by-tensor into the pre-allocated target-dtype device model
+        # without ever holding fp32 weights + CUDA state_dict simultaneously.
+        state_dict = load_file(weights_path, device="cpu")
         state_dict = _remap_single_codebook_keys(state_dict)
         model.load_state_dict(state_dict)
-        model.to(device)
-        if dtype != torch.float32:
-            model.to(dtype)
-            # Conditioners keep fp32 numerics (log-mel of quiet passages
-            # underflows in fp16); LMModel.forward casts their outputs.
-            model.condition_provider.float()
+        del state_dict
+        # Conditioners keep fp32 numerics (log-mel of quiet passages
+        # underflows in fp16); LMModel.forward casts their outputs.
+        model.condition_provider.float()
 
         tokenizer = MT3Tokenizer(
             instrument_vocabulary="MT3_FULL_PLUS",

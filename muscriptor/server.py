@@ -684,6 +684,9 @@ def create_app(
                     )
                 )
                 # Pair start/end events into Notes for velocity estimation.
+                # Subtract detected onset_delay so crisp drum transients align
+                # with actual audio timestamps instead of lagging behind them.
+                vel_onset_delay = float(grid.onset_delay or 0.0) if grid else 0.0
                 name_to_prog = default_name_to_program()
                 open_starts: dict[int, NoteStartEvent] = {}
                 paired_notes: list[Note] = []
@@ -702,12 +705,14 @@ def create_app(
                             if is_drum
                             else name_to_prog.get(st.instrument, 0)
                         )
+                        adj_onset = max(0.0, st.start_time - vel_onset_delay)
+                        adj_offset = max(adj_onset + 0.01, ev.end_time - vel_onset_delay)
                         paired_notes.append(
                             Note(
                                 is_drum=is_drum,
                                 program=prog,
-                                onset=st.start_time,
-                                offset=ev.end_time,
+                                onset=adj_onset,
+                                offset=adj_offset,
                                 pitch=st.pitch,
                             )
                         )

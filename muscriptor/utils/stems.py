@@ -136,18 +136,23 @@ def is_stem_silent(
     t = wav.detach().cpu().float()
     if t.numel() == 0:
         return True
-    if t.dim() > 1:
+    while t.dim() > 2:
+        t = t.squeeze(0)
+    if t.dim() == 2:
         t = t.mean(dim=0)
     peak = float(t.abs().max().item())
     peak_thresh = 10.0 ** (peak_db / 20.0)
     if peak < peak_thresh:
         return True
 
+    frame_thresh = 10.0 ** (frame_db / 20.0)
     frame_len = max(1, int(round(sr * 0.05)))
-    n_frames = max(1, t.numel() // frame_len)
+    if t.numel() < frame_len:
+        rms = float(torch.sqrt(torch.mean(t * t)).item())
+        return rms < frame_thresh
+    n_frames = t.numel() // frame_len
     trimmed = t[: n_frames * frame_len].reshape(n_frames, frame_len)
     frame_rms = torch.sqrt(torch.mean(trimmed * trimmed, dim=1))
-    frame_thresh = 10.0 ** (frame_db / 20.0)
     active = float((frame_rms >= frame_thresh).float().mean().item())
     return active < active_ratio
 

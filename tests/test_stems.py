@@ -173,3 +173,46 @@ def test_auto_dtype_selects_half_for_large_on_8gb_cuda(monkeypatch):
     assert _auto_dtype(torch.device("cuda"), _CONFIGS["large"]) == torch.float32
     assert _auto_dtype(torch.device("mps"), _CONFIGS["medium"]) == torch.float16
     assert _auto_dtype(torch.device("cpu"), _CONFIGS["large"]) == torch.float32
+
+
+def test_is_stem_silent_handles_sub_50ms_clips_and_3d_tensors():
+    sr = 16000
+    n = int(0.02 * sr)  # 20 ms < 50 ms frame_len
+    t = torch.arange(n, dtype=torch.float32) / sr
+    active_short = (0.4 * torch.sin(2.0 * math.pi * 440.0 * t)).unsqueeze(0)
+    silent_short = torch.zeros(1, n, dtype=torch.float32)
+    active_3d = active_short.repeat(2, 1).unsqueeze(0)  # [1, 2, T]
+
+    assert is_stem_silent(active_short, sr=sr) is False
+    assert is_stem_silent(silent_short, sr=sr) is True
+    assert is_stem_silent(active_3d, sr=sr) is False
+
+
+def test_load_model_builds_in_target_dtype_and_loads_weights_on_cpu(monkeypatch, tmp_path):
+    from muscriptor.transcription_model import TranscriptionModel, _ModelConfig, _build_model
+
+    tiny_cfg = _ModelConfig(dim=32, num_heads=2, num_layers=1, card=64)
+    # 1. _build_model directly constructs transformer, out_norm, and linear in target dtype
+    # while keeping condition_provider in float32 (avoiding fp32 peak allocation on 8 GB GPUs).
+    built = _build_model(torch.device("cpu"), tiny_cfg, dtype=torch.bfloat16)
+    assert built.emb.weight.dtype == torch.bfloat16
+    assert built.out_norm.weight.dtype == torch.bfloat16
+    assert built.linear.weight.dtype == torch.bfloat16
+    assert next(built.condition_provider.parameters()).dtype == torch.float32
+
+    # 2. load_model loads safetensors onto CPU first (not directly onto CUDA alongside model weights).
+    fake_weights = tmp_path / "model.safetensors"
+    fake_weights.write_bytes(b"")
+    seen: dict[str, object] = {}
+
+    def _fake_load_file(path, device="cpu"):
+        seen["load_file_device"] = device
+        return built.state_dict()
+
+    monkeypatch.setattr("muscriptor.transcription_model.download_if_necessary", lambda src: fake_weights)
+    monkeypatch.setattr("muscriptor.transcription_model._resolve_config", lambda src, p: tiny_cfg)
+    monkeypatch.setattr("muscriptor.transcription_model.load_file", _fake_load_file)
+
+    tm = TranscriptionModel.load_model(weights_path=fake_weights, device="cpu", dtype="bfloat16")
+    assert seen["load_file_device"] == "cpu"
+    assert tm._model.linear.weight.dtype == torch.bfloat16

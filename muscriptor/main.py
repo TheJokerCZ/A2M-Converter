@@ -39,6 +39,7 @@ from muscriptor.utils.sheets import (
 )
 from muscriptor.utils.stems import (
     SeparationMode,
+    StemSeparationUnavailableError,
     is_stem_silent,
     plan_stem_conditioning,
     separate_stems,
@@ -566,7 +567,11 @@ def transcribe(
         stem_audio: dict[str, tuple] = {}
         if separation != "none":
             typer.echo(f"Separating stems ({separation})…", err=True)
-            stem_audio = separate_stems(wav, sr, mode=separation, device=_device)
+            try:
+                stem_audio = separate_stems(wav, sr, mode=separation, device=_device)
+            except StemSeparationUnavailableError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
 
         typer.echo("Loading model…", err=True)
         model = _load_model(model_path, _device, dtype)
@@ -686,10 +691,19 @@ def transcribe(
 
         vel_by_index: dict[int, int] | None = None
         if do_velocity:
+            vel_onset_delay = float(beat_grid.onset_delay or 0.0) if beat_grid else 0.0
+            vel_notes = [
+                dataclasses.replace(
+                    n,
+                    onset=max(0.0, n.onset - vel_onset_delay),
+                    offset=max(max(0.0, n.onset - vel_onset_delay) + 0.01, n.offset - vel_onset_delay),
+                )
+                for n in paired_notes
+            ]
             audio_lookup = dict(stem_audio) if stem_audio else {}
             audio_lookup.setdefault("mix", (wav, sr))
             vels = estimate_note_velocities(
-                paired_notes, audio_lookup, note_stems=paired_stems
+                vel_notes, audio_lookup, note_stems=paired_stems
             )
             vel_by_index = {idx: v for idx, v in zip(paired_indices, vels)}
             paired_notes = [
@@ -724,6 +738,29 @@ def transcribe(
             typer.echo(f"Saved FL Studio bundle to {output}", err=True)
             return
 
+        if format == OutputFormat.sheets:
+            midi_bytes = model.events_to_midi_bytes(
+                iter(events),
+                beat_grid=beat_grid,
+                export=export,
+                note_velocities=vel_by_index,
+            )
+            typer.echo(f"Engraving sheet music with MuseScore → {output} …", err=True)
+            try:
+                written = write_sheets(
+                    midi_bytes,
+                    output,
+                    quantized=beat_grid is not None
+                    and beat_grid.beat_subdivision is not None,
+                )
+            except MuseScoreError as e:
+                typer.echo(f"Error: {e}", err=True)
+                raise typer.Exit(1)
+            for path in written:
+                typer.echo(f"  {path.name}", err=True)
+            typer.echo(f"Saved {len(written)} files to {output}", err=True)
+            return
+
         if format == OutputFormat.midi:
             midi_bytes = model.events_to_midi_bytes(
                 iter(events),
@@ -737,7 +774,55 @@ def transcribe(
             else:
                 output.write_bytes(midi_bytes)
                 typer.echo(f"Saved MIDI to {output}", err=True)
+            if notes:
+                typer.echo(
+                    "Re-run with --format json to inspect the event stream.", err=True
+                )
+            if auralize is not None and not is_stdout:
+                from muscriptor.utils.auralization import auralize as do_auralize
+
+                typer.echo(f"Auralizing → {auralize} …", err=True)
+                do_auralize(
+                    midi_path=output,
+                    original_audio_path=audio_file,
+                    output_path=auralize,
+                    soundfont_path=soundfont,
+                )
+                typer.echo(f"Saved auralization to {auralize}", err=True)
             return
+
+        if format == OutputFormat.jsonl:
+            if is_stdout:
+                sink = sys.stdout
+                close_after = False
+            else:
+                sink = output.open("w")
+                close_after = True
+            try:
+                for e in events:
+                    sink.write(json.dumps(_event_to_dict(e)) + "\n")
+                    sink.flush()
+                    if notes:
+                        typer.echo(str(e), err=True)
+            finally:
+                if close_after:
+                    sink.close()
+            if not is_stdout:
+                typer.echo(f"Saved JSONL to {output}", err=True)
+            return
+
+        # OutputFormat.json
+        payload = json.dumps([_event_to_dict(e) for e in events], indent=2)
+        if is_stdout:
+            sys.stdout.write(payload + "\n")
+            sys.stdout.flush()
+        else:
+            output.write_text(payload)
+            typer.echo(f"Saved JSON to {output}", err=True)
+        if notes:
+            for e in events:
+                typer.echo(str(e), err=True)
+        return
 
     # All chatty progress/timing info goes to stderr — stdout is reserved for
     # the actual output when `-o -` is used.
