@@ -188,3 +188,34 @@ def test_instruments_given_activates_forbidden_tokens(tokenizer):
 
 def test_no_instruments_means_no_forbidden_tokens(tokenizer):
     assert _forbidden_tokens_used_by_transcribe(None, tokenizer) is None
+
+
+def test_allowed_instruments_masks_logits_without_class_conditioning(tokenizer):
+    captured = {}
+
+    class _Fake:
+        _device = torch.device("cpu")
+        _tokenizer = tokenizer
+        _instrument_for_program = staticmethod(lambda program: "x")
+        _resolve_batch_size = TranscriptionModel._resolve_batch_size
+
+        def _load_wav(self, audio, sample_rate):
+            return torch.zeros(1, 16000)
+
+        def _build_conditions(self, wav, instrument_group=None):
+            captured["instrument_group"] = instrument_group
+            return [SimpleNamespace()]
+
+        def _generate_token_stream(self, *args):
+            captured["forbidden_tokens"] = args[-1]
+            return iter([])
+
+    allowed = ["acoustic_piano", "synth_lead"]
+    list(
+        TranscriptionModel.transcribe(
+            _Fake(), "unused.wav", instruments=None, allowed_instruments=allowed
+        )
+    )
+    assert captured["instrument_group"] is None
+    assert captured["forbidden_tokens"] is not None
+    assert captured["forbidden_tokens"].tolist() == tokenizer.forbidden_token_ids(allowed)

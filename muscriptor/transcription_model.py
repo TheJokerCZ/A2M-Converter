@@ -8,7 +8,7 @@ import re
 import sys
 import time
 import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -183,7 +183,34 @@ def _remap_single_codebook_keys(state_dict: dict) -> dict:
     return remapped
 
 
-def _build_model(device: torch.device, cfg: _ModelConfig = _DEFAULT_CONFIG) -> LMModel:
+_LOW_VRAM_BYTES = 12 * 1024**3
+
+
+def _auto_dtype(device: torch.device, cfg: _ModelConfig) -> torch.dtype:
+    """Pick default weight dtype for `device` and model config.
+
+    On MPS, fp16 halves memory bandwidth. On CUDA GPUs with <= 12 GiB VRAM,
+    loading the 1.4B `large` checkpoint (`dim >= 1536`) in bf16/fp16 keeps
+    weights at ~2.8 GB instead of ~5.6 GB so it runs reliably alongside audio
+    buffers on 8 GB cards.
+    """
+    if device.type == "mps":
+        return torch.float16
+    if device.type == "cuda" and cfg.dim >= 1536:
+        try:
+            total_mem = torch.cuda.get_device_properties(device).total_memory
+        except Exception:
+            total_mem = _LOW_VRAM_BYTES + 1
+        if total_mem <= _LOW_VRAM_BYTES:
+            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    return torch.float32
+
+
+def _build_model(
+    device: torch.device,
+    cfg: _ModelConfig = _DEFAULT_CONFIG,
+    autocast_dtype: torch.dtype = torch.float16,
+) -> LMModel:
     mel_cond = MelSpectrogramConditioner(
         output_dim=cfg.dim,
         device=device,
@@ -211,7 +238,9 @@ def _build_model(device: torch.device, cfg: _ModelConfig = _DEFAULT_CONFIG) -> L
     # (see load_model) — autocast there is measurably slower than fp32.
     autocast = TorchAutocast(enabled=False)
     if device.type == "cuda":
-        autocast = TorchAutocast(enabled=True, device_type="cuda", dtype=torch.float16)
+        autocast = TorchAutocast(
+            enabled=True, device_type="cuda", dtype=autocast_dtype
+        )
 
     model = LMModel(
         condition_provider=condition_provider,
@@ -304,14 +333,17 @@ class TranscriptionModel:
         elif isinstance(device, str):
             device = torch.device(device)
 
+        source = _resolve_source(weights_path)
+        weights_path = download_if_necessary(source)
+        cfg = _resolve_config(source, weights_path)
+
         if dtype is None:
-            dtype = torch.float16 if device.type == "mps" else torch.float32
+            dtype = _auto_dtype(device, cfg)
         elif isinstance(dtype, str):
             dtype = getattr(torch, dtype)
 
-        source = _resolve_source(weights_path)
-        weights_path = download_if_necessary(source)
-        model = _build_model(device, _resolve_config(source, weights_path))
+        autocast_dtype = torch.bfloat16 if dtype == torch.bfloat16 else torch.float16
+        model = _build_model(device, cfg, autocast_dtype=autocast_dtype)
         model.eval()
 
         state_dict = load_file(weights_path, device=str(device))
@@ -343,6 +375,7 @@ class TranscriptionModel:
         no_eos_is_ok: bool = True,
         beam_size: int = 1,
         prelude_forcing: bool = True,
+        allowed_instruments: list[str] | None = None,
     ) -> Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent]:
         """Transcribe audio into a stream of note events.
 
@@ -380,13 +413,17 @@ class TranscriptionModel:
 
         # Exact names only here — the CLI resolves abbreviations before
         # calling in (resolve_instrument_names).
+        # `instruments` activates BOTH ClassConditioner prompt and logit mask;
+        # `allowed_instruments` (when `instruments` is None) activates ONLY the
+        # logit mask so multi-instrument stems avoid out-of-distribution prompts.
         instrument_group = (
             instrument_group_from_names(instruments) if instruments else None
         )
+        mask_instruments = instruments if instruments else allowed_instruments
         forbidden_tokens = None
-        if instruments:
+        if mask_instruments:
             forbidden_tokens = torch.tensor(
-                self._tokenizer.forbidden_token_ids(instruments),
+                self._tokenizer.forbidden_token_ids(mask_instruments),
                 device=self._device,
                 dtype=torch.long,
             )
@@ -706,6 +743,7 @@ class TranscriptionModel:
         events: Iterator[NoteStartEvent | NoteEndEvent | ProgressEvent],
         beat_grid: BeatGrid | None = None,
         export: ExportOptions | None = None,
+        note_velocities: Mapping[int, int] | None = None,
     ) -> bytes:
         """Reassemble Notes from a NoteStart/NoteEnd stream and serialize MIDI.
 
@@ -737,6 +775,9 @@ class TranscriptionModel:
                     onset=ev.start_time,
                     offset=ev.start_time,  # patched on NoteEndEvent
                     pitch=ev.pitch,
+                    velocity=note_velocities.get(ev.index, 100)
+                    if note_velocities is not None
+                    else 100,
                 )
                 open_notes[ev.index] = note
             else:  # NoteEndEvent
