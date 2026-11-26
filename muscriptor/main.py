@@ -3,6 +3,7 @@
 import dataclasses
 import json
 import sys
+import wave
 from enum import Enum
 from pathlib import Path
 from typing import Annotated, Literal
@@ -10,13 +11,24 @@ from typing import Annotated, Literal
 import typer
 
 from muscriptor.events import NoteEndEvent, NoteStartEvent, ProgressEvent
+from muscriptor.model_manager import ModelManager
+from muscriptor.sessions import SessionStore
 from muscriptor.tokenizer.mt3 import (
     MT3_FULL_PLUS_GROUP_NAMES,
     resolve_instrument_names,
 )
+from muscriptor.tokenizer.notes import (
+    DRUM_PROGRAM,
+    Note,
+    trim_overlapping_notes,
+    validate_notes,
+)
 from muscriptor.transcription_model import TranscriptionModel
+from muscriptor.utils.audio import _read_non_wav_file, _read_wav_file
 from muscriptor.utils.beats import BeatDetectionError, TempoDetection
+from muscriptor.utils.cleanup import default_name_to_program
 from muscriptor.utils.download import ModelDownloadError
+from muscriptor.utils.fl_export import build_fl_bundle
 from muscriptor.utils.midi import ExportOptions
 from muscriptor.utils.sheets import (
     MuseScoreError,
@@ -25,6 +37,13 @@ from muscriptor.utils.sheets import (
     prepare_output_dir,
     write_sheets,
 )
+from muscriptor.utils.stems import (
+    SeparationMode,
+    is_stem_silent,
+    plan_stem_conditioning,
+    separate_stems,
+)
+from muscriptor.utils.velocity import estimate_note_velocities
 
 app = typer.Typer(add_completion=False, help="muscriptor — audio-to-MIDI transcription")
 
@@ -48,6 +67,7 @@ class OutputFormat(str, Enum):
     json = "json"
     jsonl = "jsonl"
     sheets = "sheets"
+    fl_bundle = "fl-bundle"
 
 
 def _transcribe(model, kwargs: dict, detect_tempo: str, export: ExportOptions):
@@ -352,6 +372,82 @@ def transcribe(
             rich_help_panel="MIDI timing",
         ),
     ] = False,
+    separation: Annotated[
+        SeparationMode,
+        typer.Option(
+            "--separation",
+            help="Stem separation mode before transcribing: 'none', 'stems_4' (htdemucs_ft), or 'stems_6' (htdemucs_6s).",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = "none",
+    stems: Annotated[
+        str | None,
+        typer.Option(
+            "--stems",
+            help="Comma-separated subset of stems to transcribe (e.g. 'drums,bass,other').",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = None,
+    estimate_velocity: Annotated[
+        bool | None,
+        typer.Option(
+            "--estimate-velocity/--no-estimate-velocity",
+            help="Estimate per-note MIDI velocities from audio energy. Default: on for --separation != none or --format fl-bundle.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = None,
+    min_note_ms: Annotated[
+        float,
+        typer.Option(
+            "--min-note-ms",
+            min=0.0,
+            help="Drop non-drum notes shorter than this many milliseconds (0 disables).",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = 0.0,
+    min_velocity: Annotated[
+        int,
+        typer.Option(
+            "--min-velocity",
+            min=1,
+            max=127,
+            help="Drop notes with MIDI velocity below this threshold.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = 1,
+    deduplicate_ms: Annotated[
+        float,
+        typer.Option(
+            "--deduplicate-ms",
+            min=0.0,
+            help="Merge same-(instrument, pitch) hits within this many milliseconds.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = 0.0,
+    split_drums: Annotated[
+        bool,
+        typer.Option(
+            "--split-drums",
+            help="Split GM drums into Kick, Snare, Hi-Hat, Toms, Cymbals, and Perc tracks.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = False,
+    c5_drums: Annotated[
+        bool,
+        typer.Option(
+            "--c5-drums/--no-c5-drums",
+            help="Normalize single-hit drum lane MIDIs (kick/snare/hihat) to C5 (MIDI 60) in FL bundles.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = True,
+    include_stems: Annotated[
+        bool,
+        typer.Option(
+            "--include-stems/--no-include-stems",
+            help="Include bar-1-aligned WAV stems inside --format fl-bundle archives when separation ran.",
+            rich_help_panel="Studio & FL Export",
+        ),
+    ] = True,
 ) -> None:
     """Transcribe an audio file to MIDI."""
     instrument_names: list[str] | None = None
@@ -386,6 +482,8 @@ def transcribe(
     if output is None:
         if format == OutputFormat.sheets:
             output = audio_file.parent / f"{audio_file.stem}_sheets"
+        elif format == OutputFormat.fl_bundle:
+            output = audio_file.parent / f"{audio_file.stem}_fl_studio.zip"
         else:
             suffix = {
                 OutputFormat.midi: ".mid",
@@ -393,6 +491,13 @@ def transcribe(
                 OutputFormat.jsonl: ".jsonl",
             }[format]
             output = audio_file.with_suffix(suffix)
+
+    if format == OutputFormat.fl_bundle and is_stdout:
+        typer.echo(
+            "Error: --format fl-bundle writes a ZIP archive, so it cannot write to stdout. Pass a path with -o.",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     if format == OutputFormat.sheets:
         if is_stdout:
@@ -426,12 +531,213 @@ def transcribe(
             strength=quantize_strength,
             fill_gaps=fill_gaps,
             trim_leading_bars=trim_leading_bars,
+            min_note_duration_ms=min_note_ms,
+            min_velocity=min_velocity,
+            deduplicate_ms=deduplicate_ms,
+            split_drums=split_drums,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
 
     _device = None if device == "auto" else device
+    do_velocity = (
+        estimate_velocity
+        if estimate_velocity is not None
+        else (separation != "none" or format == OutputFormat.fl_bundle)
+    )
+    active_stem_list = (
+        [s.strip().lower() for s in stems.split(",") if s.strip()]
+        if stems
+        else None
+    )
+
+    if auralize is not None and format != OutputFormat.midi:
+        typer.echo("Error: --auralize requires --format midi", err=True)
+        raise typer.Exit(1)
+
+    # Studio pipeline path (stem separation, audio velocity, or FL bundle export).
+    if separation != "none" or format == OutputFormat.fl_bundle or do_velocity:
+        try:
+            wav, sr = _read_wav_file(str(audio_file))
+        except (wave.Error, EOFError):
+            wav, sr = _read_non_wav_file(str(audio_file))
+
+        stem_audio: dict[str, tuple] = {}
+        if separation != "none":
+            typer.echo(f"Separating stems ({separation})…", err=True)
+            stem_audio = separate_stems(wav, sr, mode=separation, device=_device)
+
+        typer.echo("Loading model…", err=True)
+        model = _load_model(model_path, _device, dtype)
+        typer.echo(f"Transcribing {audio_file} …", err=True)
+
+        events: list[NoteStartEvent | NoteEndEvent] = []
+        note_stems_by_index: dict[int, str] = {}
+        next_idx = 0
+
+        if separation != "none" and stem_audio:
+            plans = plan_stem_conditioning(
+                separation,
+                active_stems=active_stem_list,
+                user_instruments=instrument_names,
+            )
+            for plan in plans:
+                if plan.stem not in stem_audio:
+                    continue
+                s_wav, s_sr = stem_audio[plan.stem]
+                if is_stem_silent(s_wav, sr=s_sr):
+                    typer.echo(f"Skipping silent {plan.stem} stem", err=True)
+                    continue
+                typer.echo(f"  Transcribing {plan.stem}…", err=True)
+                local_map: dict[int, NoteStartEvent] = {}
+                t_kw = dict(
+                    use_sampling=sampling,
+                    temperature=temperature,
+                    cfg_coef=cfg_coef,
+                    instruments=plan.instruments,
+                    batch_size=batch_size,
+                    no_eos_is_ok=not strict_eos,
+                    beam_size=beam_size,
+                    prelude_forcing=prelude_forcing,
+                )
+                if plan.allowed_instruments is not None:
+                    t_kw["allowed_instruments"] = plan.allowed_instruments
+                for ev in model.transcribe((s_wav, s_sr), **t_kw):
+                    if isinstance(ev, ProgressEvent):
+                        continue
+                    if isinstance(ev, NoteStartEvent):
+                        remapped = NoteStartEvent(
+                            pitch=ev.pitch,
+                            start_time=ev.start_time,
+                            index=next_idx,
+                            instrument=ev.instrument,
+                        )
+                        local_map[ev.index] = remapped
+                        note_stems_by_index[next_idx] = plan.stem
+                        next_idx += 1
+                        events.append(remapped)
+                    else:
+                        st = local_map.get(ev.start_event_index)
+                        if st is not None:
+                            events.append(
+                                NoteEndEvent(end_time=ev.end_time, start_event=st)
+                            )
+        else:
+            for ev in model.transcribe(
+                (wav, sr),
+                use_sampling=sampling,
+                temperature=temperature,
+                cfg_coef=cfg_coef,
+                instruments=instrument_names,
+                batch_size=batch_size,
+                no_eos_is_ok=not strict_eos,
+                beam_size=beam_size,
+                prelude_forcing=prelude_forcing,
+            ):
+                if isinstance(ev, ProgressEvent):
+                    continue
+                if isinstance(ev, NoteStartEvent):
+                    note_stems_by_index[ev.index] = "mix"
+                events.append(ev)
+
+        mode: TempoDetection = {
+            "true": True,
+            "false": False,
+            "best-effort": "best-effort",
+        }[detect_tempo]
+        try:
+            beat_grid = model.detect_beat_grid_for((wav, sr), mode)
+        except BeatDetectionError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
+        if beat_grid is not None:
+            beat_grid = beat_grid.with_onset_delay(
+                [ev.start_time for ev in events if isinstance(ev, NoteStartEvent)]
+            )
+
+        name_to_prog = default_name_to_program()
+        open_starts: dict[int, NoteStartEvent] = {}
+        paired_notes: list[Note] = []
+        paired_indices: list[int] = []
+        paired_stems: list[str] = []
+        program_names: dict[int, str] = {}
+        for ev in events:
+            if isinstance(ev, NoteStartEvent):
+                open_starts[ev.index] = ev
+            elif isinstance(ev, NoteEndEvent):
+                st = open_starts.pop(ev.start_event_index, None)
+                if st is None:
+                    continue
+                is_drum = st.instrument == "drums"
+                prog = DRUM_PROGRAM if is_drum else name_to_prog.get(st.instrument, 0)
+                program_names[prog] = st.instrument.replace("_", " ")
+                paired_notes.append(
+                    Note(
+                        is_drum=is_drum,
+                        program=prog,
+                        onset=st.start_time,
+                        offset=ev.end_time,
+                        pitch=st.pitch,
+                    )
+                )
+                paired_indices.append(st.index)
+                paired_stems.append(note_stems_by_index.get(st.index, "mix"))
+
+        vel_by_index: dict[int, int] | None = None
+        if do_velocity:
+            audio_lookup = dict(stem_audio) if stem_audio else {}
+            audio_lookup.setdefault("mix", (wav, sr))
+            vels = estimate_note_velocities(
+                paired_notes, audio_lookup, note_stems=paired_stems
+            )
+            vel_by_index = {idx: v for idx, v in zip(paired_indices, vels)}
+            paired_notes = [
+                dataclasses.replace(n, velocity=v)
+                for n, v in zip(paired_notes, vels)
+            ]
+
+        if format == OutputFormat.fl_bundle:
+            paired_notes = trim_overlapping_notes(
+                validate_notes(paired_notes, fix=True), sort=True
+            )
+            selected_stems = (
+                {
+                    k: v
+                    for k, v in stem_audio.items()
+                    if active_stem_list is None or k in active_stem_list
+                }
+                if (include_stems and stem_audio)
+                else None
+            )
+            zip_bytes = build_fl_bundle(
+                paired_notes,
+                program_names=program_names,
+                beat_grid=beat_grid,
+                options=export,
+                stem_audio=selected_stems,
+                include_stems=include_stems,
+                normalize_drum_lanes_to_c5=c5_drums,
+                song_name=audio_file.stem,
+            )
+            output.write_bytes(zip_bytes)
+            typer.echo(f"Saved FL Studio bundle to {output}", err=True)
+            return
+
+        if format == OutputFormat.midi:
+            midi_bytes = model.events_to_midi_bytes(
+                iter(events),
+                beat_grid=beat_grid,
+                export=export,
+                note_velocities=vel_by_index,
+            )
+            if is_stdout:
+                sys.stdout.buffer.write(midi_bytes)
+                sys.stdout.buffer.flush()
+            else:
+                output.write_bytes(midi_bytes)
+                typer.echo(f"Saved MIDI to {output}", err=True)
+            return
 
     # All chatty progress/timing info goes to stderr — stdout is reserved for
     # the actual output when `-o -` is used.
@@ -439,10 +745,6 @@ def transcribe(
     model = _load_model(model_path, _device, dtype)
 
     typer.echo(f"Transcribing {audio_file} …", err=True)
-
-    if auralize is not None and format != OutputFormat.midi:
-        typer.echo("Error: --auralize requires --format midi", err=True)
-        raise typer.Exit(1)
 
     kwargs = dict(
         audio=audio_file,
@@ -560,10 +862,17 @@ def serve(
             "--dtype",
             help=(
                 "Transformer dtype: 'float32', 'float16' or 'bfloat16'. "
-                "Default: float16 on MPS, float32 elsewhere."
+                "Default: float16 on MPS, bf16/fp16 for large on <=12GB CUDA, float32 elsewhere."
             ),
         ),
     ] = None,
+    preload: Annotated[
+        bool,
+        typer.Option(
+            "--preload/--no-preload",
+            help="Eagerly download and load the default model before starting HTTP (default: lazy load on first request).",
+        ),
+    ] = False,
 ):
     """Run the HTTP transcription server (POST /transcribe → SSE event stream)."""
     import logging
@@ -577,10 +886,22 @@ def serve(
     )
 
     _device = None if device == "auto" else device
-    typer.echo("Loading model…")
-    model = _load_model(model_path, _device, dtype)
+    manager = ModelManager(default_model=model_path, device=_device, dtype=dtype)
+    store = SessionStore()
+    if preload:
+        typer.echo("Loading model…")
+        try:
+            manager.get_model()
+        except ModelDownloadError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(1)
     web_dir = Path(__file__).resolve().parent / "web_dist"
-    fastapi_app = create_app(model, web_dir=web_dir if web_dir.is_dir() else None)
+    fastapi_app = create_app(
+        model=None,
+        web_dir=web_dir if web_dir.is_dir() else None,
+        model_manager=manager,
+        session_store=store,
+    )
     uvicorn.run(fastapi_app, host=host, port=port)
 
 
