@@ -1,13 +1,11 @@
 <p align="center">
-  <img src="web/logo_muscriptor_final.png" alt="MuScriptor logo" width="300">
+  <img src="web/logo_muscriptor_final.png" alt="A2M Converter logo" width="300">
 </p>
 
-# MuScriptor
+# A2M Converter
 
-MuScriptor is a multi-instrument music transcription model developed by [Kyutai](https://kyutai.org) and [Mirelo](https://www.mirelo.ai).
-It turns a recording into MIDI and into sheet music.
-It's the most accurate open-source transcription model.
-You can use the model [here](https://muscriptor.kyutai.org) or self-host it using this repository.
+**A2M Converter** is a stem-first Audio-to-MIDI & FL Studio export studio built on [MuScriptor](https://github.com/muscriptor/muscriptor) (by [Kyutai](https://kyutai.org) and [Mirelo](https://www.mirelo.ai)) and local GPU stem separation (`demucs-infer`).
+It turns raw songs into separated WAV stems, velocity-aware multi-track MIDI, split C5 drum lanes, interactive Piano Roll edits, and sheet music.
 
 
 [Use it](https://muscriptor.kyutai.org) | [Paper](https://arxiv.org/abs/2607.08168v2) | [HuggingFace](https://huggingface.co/MuScriptor)

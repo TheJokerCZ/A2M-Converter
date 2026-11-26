@@ -8,11 +8,9 @@ import clsx from "clsx";
  */
 const SEGMENTS: { text: string; href?: string }[] = [
   { text: "Feedback, question, bug? " },
-  { text: "Email us", href: "mailto:muscriptor@kyutai.org" },
-  { text: " or " },
   {
-    text: "open an issue",
-    href: "https://github.com/muscriptor/muscriptor/issues/new/choose",
+    text: "Open an issue on GitHub",
+    href: "https://github.com/TheJokerCZ/A2M-Converter/issues/new/choose",
   },
 ];
 

@@ -16,12 +16,12 @@ import { track } from "../analytics";
  *  from the same text (see `renderAnswer` / `plainText`). */
 const QA: { q: string; a: string }[] = [
   {
-    q: "What is MuScriptor?",
-    a: "MuScriptor turns music into MIDI and sheet music: you give it a recording and it transcribes the notes played by every instrument. It was developed by [Kyutai](https://kyutai.org/) and [Mirelo](https://mirelo.ai/).",
+    q: "What is A2M Converter?",
+    a: "A2M Converter turns music into multi-track MIDI, FL Studio stem bundles, and sheet music using GPU stem separation (Demucs) and the [MuScriptor](https://github.com/muscriptor/muscriptor) model developed by [Kyutai](https://kyutai.org/) and [Mirelo](https://mirelo.ai/).",
   },
   {
     q: "Is it free to use?",
-    a: "Yes. This demo is free, the code is MIT-licensed, and the model weights are published on HuggingFace under CC BY-NC 4.0 (non-commercial use). If you want to run it locally, check out our [GitHub repo](https://github.com/muscriptor/muscriptor).",
+    a: "Yes. The code is MIT-licensed, and the underlying MuScriptor weights are published on HuggingFace under CC BY-NC 4.0 (non-commercial use). Check out the [A2M Converter GitHub repo](https://github.com/TheJokerCZ/A2M-Converter).",
   },
   {
     q: "What audio formats can I upload?",
@@ -41,27 +41,27 @@ const QA: { q: string; a: string }[] = [
   },
   {
     q: "Can I run it locally or use it from Python?",
-    a: "Yes. `uvx muscriptor serve` runs this same web UI on your machine, `uvx muscriptor transcribe song.mp3` does it from the command line, and the Python API is a couple of lines. It runs on NVIDIA GPUs, on Apple Silicon via Metal, and on CPU with the small model. [Setup instructions are on GitHub](https://github.com/muscriptor/muscriptor).",
+    a: "Yes. `muscriptor serve` runs this same web UI on your machine, `muscriptor transcribe song.mp3` does it from the command line, and the Python API is a couple of lines. It runs on NVIDIA GPUs, on Apple Silicon via Metal, and on CPU with the small model. [Setup instructions are on GitHub](https://github.com/TheJokerCZ/A2M-Converter).",
   },
   {
     q: "How accurate is it?",
-    a: "It's the strongest open transcription model we know of, but it is not perfect. Expect a very good starting point that you clean up in a DAW. MuScriptor tends to work better on acoustic and guitar music than electronic music. If you'd like a more exact benchmark, [check out the paper](https://arxiv.org/abs/2607.08168).",
+    a: "It uses stem separation plus MuScriptor, the strongest open transcription model we know of, and estimates real per-note MIDI velocity from the audio. If you'd like the model benchmark, [check out the MuScriptor paper](https://arxiv.org/abs/2607.08168).",
   },
   {
     q: "What happens to the audio I upload?",
-    a: "It's transcribed on the server and not kept afterwards. If you'd rather it never leaves your machine, [run MuScriptor locally](https://github.com/muscriptor/muscriptor).",
+    a: "When running locally, nothing leaves your machine. When hosted on a server, it is processed for transcription and export without permanent retention.",
   },
   {
     q: "How does it work, technically?",
-    a: "MuScriptor is a decoder-only transformer that reads the audio in 5-second chunks and generates a token stream describing note onsets, offsets and instruments, which is then assembled into MIDI. A major reason why it works so well is the dataset: MuScriptor is trained on 170k songs spanning classical music to heavy metal. [Read more in the paper](https://arxiv.org/abs/2607.08168).",
+    a: "A2M Converter optionally separates your track into stems with Demucs, runs the MuScriptor decoder-only transformer on each stem, estimates note velocities via STFT/transient energy, and lets you edit the Piano Roll or export an FL Studio ZIP bundle. [Read more about MuScriptor in the paper](https://arxiv.org/abs/2607.08168).",
   },
   {
     q: "Where can I find the code?",
-    a: "On GitHub: [github.com/muscriptor/muscriptor](https://github.com/muscriptor/muscriptor). The code is MIT-licensed.",
+    a: "On GitHub: [github.com/TheJokerCZ/A2M-Converter](https://github.com/TheJokerCZ/A2M-Converter). The code is MIT-licensed.",
   },
   {
     q: "How do I report a bug or send feedback?",
-    a: "Please [email us](mailto:muscriptor@kyutai.org) or [open an issue on GitHub](https://github.com/muscriptor/muscriptor/issues/new/choose).",
+    a: "Please [open an issue on GitHub](https://github.com/TheJokerCZ/A2M-Converter/issues/new/choose).",
   },
 ];
 

@@ -368,7 +368,7 @@ export function useTranscription(deps: TranscriptionDeps) {
       const message =
         e instanceof TranscribeError && e.userMessage
           ? e.userMessage
-          : "The muscriptor server is temporarily unavailable. Please try again later.";
+          : "The A2M Converter server is temporarily unavailable. Please try again later.";
       track("transcription_error", {
         status: e instanceof TranscribeError ? e.status : undefined,
         message: (e instanceof Error ? e.message : String(e)) + ": " + message,

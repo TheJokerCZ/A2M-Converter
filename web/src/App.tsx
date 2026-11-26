@@ -545,14 +545,14 @@ export function App() {
         >
           <img
             src="/muscriptor-logo-v4.svg"
-            alt="MuScriptor logo"
+            alt="A2M Converter logo"
             className="block h-[clamp(72px,10vw,110px)] w-auto"
             draggable={false}
           />
           <div className="flex flex-col gap-1">
-            <span className="text-[clamp(2.3rem,6vw,3rem)] font-bold leading-none text-white">MuScriptor</span>
+            <span className="text-[clamp(2.3rem,6vw,3rem)] font-bold leading-none text-white">A2M Converter</span>
             <span className="text-sm text-muted">
-              Music to MIDI and sheet music
+              Stem-first Audio to MIDI &amp; FL Studio Export
             </span>
           </div>
         </div>

@@ -12,7 +12,7 @@ import { StudioSettingsPanel } from "./StudioSettingsPanel";
 import type { AppError, SubmitState } from "../App";
 import type { ServerCapabilities, StudioConfig } from "../capabilities";
 
-const SERVER_DOWN = "The muscriptor server is temporarily unavailable.";
+const SERVER_DOWN = "The A2M Converter server is temporarily unavailable.";
 
 /** Whole seconds left until `at` (a `Date.now()` timestamp), or null when
  *  there's nothing to count down to. Re-renders on a sub-second interval so the
@@ -123,10 +123,10 @@ export function WelcomeScreen(props: {
   return (
     <main className="mx-auto flex max-w-3xl flex-col gap-4 px-7 pb-12 pt-2 animate-rise [animation-delay:0.06s]">
       <p className="text-base leading-relaxed text-muted">
-        MuScriptor is the best open model for multi-instrument transcription to
-        date. Give it a recording: pop, classical, metal, jazz, whatever, and
-        it transcribes the notes played by every instrument into MIDI and sheet
-        music, for you to download or explore interactively.
+        A2M Converter separates your track into stems, transcribes every
+        instrument with MuScriptor, estimates real note velocity from the audio,
+        and lets you edit the Piano Roll before exporting a ready-to-mix{" "}
+        <strong className="font-semibold text-content">FL Studio</strong> bundle.
       </p>
       {/* Explicit extensions alongside the wildcard, needed for iOS Safari
        * which sometimes grays out perfectly valid audio files otherwise. */}
