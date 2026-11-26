@@ -52,6 +52,17 @@ class ProgressEvent:
 
 
 @dataclass
+class StageEvent:
+    """Pipeline stage update emitted on Studio SSE streams."""
+
+    stage: str
+    message: str
+    stem: str | None = None
+    stem_index: int | None = None
+    stem_total: int | None = None
+
+
+@dataclass
 class ChunkBoundary:
     """Marks the start of a new model-output chunk in the token stream.
 

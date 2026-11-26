@@ -57,6 +57,9 @@ dependencies = [
     "beat-this>=1.1",  # Tempo and downbeat tracking
 ]
 
+[project.optional-dependencies]
+stems = ["demucs-infer"]
+
 [project.urls]
 Homepage = "https://github.com/muscriptor/muscriptor"
 Repository = "https://github.com/muscriptor/muscriptor"

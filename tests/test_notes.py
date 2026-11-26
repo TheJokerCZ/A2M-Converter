@@ -15,6 +15,7 @@ from muscriptor.tokenizer.notes import (
     trim_overlapping_notes,
     note_event2note,
     note2note_event,
+    note_event2midi,
 )
 from tests.encode_helpers import (
     note_event2event,
@@ -293,3 +294,55 @@ def test_note_event2note_drum():
     assert len(notes) == 1
     assert notes[0].is_drum
     assert notes[0].pitch == 36
+
+
+def test_note_velocity_preserved_in_midi():
+    notes = [
+        Note(is_drum=False, program=0, onset=0.0, offset=0.5, pitch=60, velocity=42),
+        Note(is_drum=False, program=0, onset=0.5, offset=1.0, pitch=64, velocity=118),
+        Note(
+            is_drum=True,
+            program=DRUM_PROGRAM,
+            onset=0.25,
+            offset=0.26,
+            pitch=36,
+            velocity=125,
+        ),
+    ]
+    midi = note_event2midi(note2note_event(notes), velocity=100)
+    note_ons = [
+        (msg.note, msg.velocity)
+        for track in midi.tracks
+        for msg in track
+        if msg.type == "note_on" and msg.velocity > 0
+    ]
+    assert (60, 42) in note_ons
+    assert (64, 118) in note_ons
+    assert (36, 125) in note_ons
+
+
+def test_legacy_note_event_without_midi_velocity_uses_default_velocity():
+    events = [
+        NoteEvent(is_drum=False, program=0, time=0.0, velocity=1, pitch=60),
+        NoteEvent(is_drum=False, program=0, time=0.5, velocity=0, pitch=60),
+    ]
+    midi = note_event2midi(events, velocity=88)
+    note_ons = [msg.velocity for t in midi.tracks for msg in t if msg.type == "note_on"]
+    assert note_ons == [88]
+
+
+def test_stage_event_fields():
+    from muscriptor.events import StageEvent
+
+    ev = StageEvent(
+        stage="transcribing",
+        message="Transcribing drums",
+        stem="drums",
+        stem_index=1,
+        stem_total=4,
+    )
+    assert ev.stage == "transcribing"
+    assert ev.message == "Transcribing drums"
+    assert ev.stem == "drums"
+    assert ev.stem_index == 1
+    assert ev.stem_total == 4
