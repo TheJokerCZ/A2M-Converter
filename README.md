@@ -200,6 +200,36 @@ uv run muscriptor transcribe path/to/audio_file.wav
 
 Again, see `--help` for more options.
 
+## Stem-First Studio & FL Studio Workflow
+
+This fork adds a **Stem-First Studio** pipeline tailored for turning dense or AI-generated full mixes into expressive, production-ready MIDI (and bar-1-aligned WAV stems) for **FL Studio**:
+
+- **GPU-safe stem separation** (`htdemucs_ft` 4-stem default or `htdemucs_6s` 6-stem) before per-stem MuScriptor transcription, with automatic silent-stem skipping and `bfloat16`/`float16` weight loading for `large` (1.4B) on 8 GB CUDA GPUs.
+- **Audio-derived per-note MIDI velocities** computed from STFT harmonic & drum-band energy instead of flat `velocity = 100`.
+- **Interactive Piano Roll Editor** in the web UI (box/click select, move, resize, double-click add, velocity slider, octave nudge, Undo/Redo, instrument track merging, and separated-stem reference auditioning).
+- **One-click FL Studio Bundle (`.zip`)** containing `00_full_mix.mid`, per-instrument `midi/*.mid` files, optional 6-lane split drums (with C5/MIDI 60 normalization for FL Studio Sampler channels), bar-1-aligned `stems/*.wav`, and `README_FL_STUDIO.txt`.
+
+### Local Windows (CUDA) quick start
+
+```powershell
+# Activate the local venv (already configured with CUDA PyTorch + demucs-infer)
+.\.venv\Scripts\Activate.ps1
+
+# Authenticate once with HuggingFace (after accepting CC BY-NC 4.0 on huggingface.co/MuScriptor)
+$env:HF_TOKEN = "hf_..."
+
+# Launch the Studio Web UI (lazy-loads models on demand, opens immediately)
+muscriptor serve --port 8222
+```
+
+Then open **http://127.0.0.1:8222/**.
+
+### CLI FL Studio bundle
+
+```powershell
+muscriptor transcribe song.wav --separation stems_4 --format fl-bundle --split-drums --quantize
+```
+
 ## License
 
 The code in this repository is released under the [MIT license](LICENSE).

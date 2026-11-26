@@ -82,6 +82,26 @@ export type NoteCleanup = {
   /** Hold notes across silences up to this many beats; 0 disables. */
   fill_gaps: number;
   trim_leading_bars: boolean;
+  use_velocities?: boolean;
+  velocity_scale?: number;
+  min_note_duration_ms?: number;
+  min_velocity?: number;
+  deduplicate_ms?: number;
+  split_drums?: boolean;
+  excluded_instruments?: string[];
+};
+
+export type FlBundleSettings = NoteCleanup & {
+  format: "bundle" | "midi";
+  use_velocities: boolean;
+  velocity_scale: number;
+  min_note_duration_ms: number;
+  min_velocity: number;
+  deduplicate_ms: number;
+  split_drums: boolean;
+  include_stems: boolean;
+  normalize_drum_lanes_to_c5: boolean;
+  exclude_muted: boolean;
 };
 
 export const DEFAULT_CLEANUP: NoteCleanup = {
@@ -90,6 +110,30 @@ export const DEFAULT_CLEANUP: NoteCleanup = {
   strength: 1,
   fill_gaps: 0.25,
   trim_leading_bars: false,
+  use_velocities: true,
+  velocity_scale: 1,
+  min_note_duration_ms: 0,
+  min_velocity: 1,
+  deduplicate_ms: 0,
+  split_drums: false,
+};
+
+export const FL_PRESET_DEFAULTS: FlBundleSettings = {
+  format: "bundle",
+  quantize: true,
+  subdivision: null,
+  strength: 1,
+  fill_gaps: 0.25,
+  trim_leading_bars: false,
+  use_velocities: true,
+  velocity_scale: 1,
+  min_note_duration_ms: 35,
+  min_velocity: 18,
+  deduplicate_ms: 25,
+  split_drums: true,
+  include_stems: true,
+  normalize_drum_lanes_to_c5: true,
+  exclude_muted: true,
 };
 
 /**
@@ -133,32 +177,82 @@ export function isRetimed(detected: BeatGrid | null, timing: TimingOverrides): b
   return timing.beat_scale !== 1 || (timing.bpm !== null && timing.bpm !== detected?.bpm);
 }
 
+function serializeExportGrid(detected: BeatGrid | null, notesAlreadyAligned: boolean) {
+  if (!detected) return null;
+  return {
+    bpm: detected.bpm,
+    beats_per_bar: detected.beats_per_bar,
+    first_downbeat: detected.first_downbeat,
+    // Studio / edited notes are already shifted by -onset_delay; send 0 so the
+    // backend never double-subtracts the model lag.
+    onset_delay: notesAlreadyAligned ? 0 : detected.onset_delay,
+    beat_subdivision: detected.beat_subdivision ?? null,
+    steady: detected.steady ?? true,
+    beats: detected.beats ?? null,
+  };
+}
+
 /** The .mid for `notes`, written by the server's /export with these options. */
 export async function exportMidi(
   notes: ExportNote[],
   detected: BeatGrid | null,
   timing: TimingOverrides,
   cleanup: NoteCleanup,
+  notesAlreadyAligned = true,
 ): Promise<Blob> {
   const resp = await fetch("/export", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      notes,
-      beat_grid: detected && {
-        bpm: detected.bpm,
-        beats_per_bar: detected.beats_per_bar,
-        first_downbeat: detected.first_downbeat,
-        onset_delay: detected.onset_delay,
-        beat_subdivision: detected.beat_subdivision ?? null,
-        steady: detected.steady ?? true,
-        beats: detected.beats ?? null,
-      },
+      notes: notes.map((n) => ({
+        instrument: n.instrument,
+        pitch: n.pitch,
+        start: n.start,
+        end: n.end,
+        velocity: Math.max(1, Math.min(127, Math.round(n.velocity ?? 100))),
+      })),
+      beat_grid: serializeExportGrid(detected, notesAlreadyAligned),
       options: { ...timing, ...cleanup },
     }),
   });
   if (!resp.ok) throw new Error(await errorDetail(resp));
   return new Blob([await resp.arrayBuffer()], { type: "audio/midi" });
+}
+
+/** Full FL Studio ZIP bundle (combined MIDI, per-instrument MIDIs, C5 drums, aligned WAV stems). */
+export async function exportFlBundle(
+  notes: ExportNote[],
+  detected: BeatGrid | null,
+  timing: TimingOverrides,
+  cleanup: NoteCleanup,
+  bundleOpts: {
+    sessionId: string | null;
+    includeStems: boolean;
+    normalizeDrumLanesToC5: boolean;
+    songName: string;
+  },
+): Promise<Blob> {
+  const resp = await fetch("/export/fl-bundle", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      notes: notes.map((n) => ({
+        instrument: n.instrument,
+        pitch: n.pitch,
+        start: n.start,
+        end: n.end,
+        velocity: Math.max(1, Math.min(127, Math.round(n.velocity ?? 100))),
+      })),
+      beat_grid: serializeExportGrid(detected, true),
+      options: { ...timing, ...cleanup },
+      session_id: bundleOpts.sessionId,
+      include_stems: bundleOpts.includeStems,
+      normalize_drum_lanes_to_c5: bundleOpts.normalizeDrumLanesToC5,
+      song_name: bundleOpts.songName,
+    }),
+  });
+  if (!resp.ok) throw new Error(await errorDetail(resp));
+  return new Blob([await resp.arrayBuffer()], { type: "application/zip" });
 }
 
 /** The FastAPI `detail` of a failed response, or its raw body if it isn't one. */

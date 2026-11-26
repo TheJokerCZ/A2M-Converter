@@ -672,8 +672,11 @@ export function App() {
             progressFillRef={progressFillRef}
             progressLabelRef={progressLabelRef}
             result={result}
+            notes={editedNotes}
+            mutedInstruments={mutedInstruments}
             currentFile={currentFile}
             timing={timing}
+            onSwitchToFixedTempo={() => setTiming((prev) => ({ ...prev, tempo_map: false }))}
             onTranscribeAnother={transcribeAnother}
           />
         </main>

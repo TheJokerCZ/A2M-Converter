@@ -2,9 +2,11 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 import clsx from "clsx";
 import { unzipSync } from "fflate";
 import { Button } from "./Button";
+import { FlExportDialog } from "./FlExportDialog";
 import { MidiExportDialog } from "./MidiExportDialog";
 import { SheetsDialog, type SheetFile } from "./SheetsDialog";
 import type { TranscriptionResult } from "../hooks/useTranscription";
+import type { EditableNote } from "../editor";
 import { IconChevron, IconDownload } from "./icons";
 import { track } from "../analytics";
 import {
@@ -33,10 +35,15 @@ export function OutputBar(props: {
   progressLabelRef: RefObject<HTMLSpanElement | null>;
   /** The finished transcription's exports, or null while there is none. */
   result: TranscriptionResult | null;
+  /** Current (possibly edited) notes in audio-aligned time. */
+  notes?: EditableNote[];
+  /** Currently muted instruments (for optional exclusion in FL export). */
+  mutedInstruments?: ReadonlySet<string>;
   /** Source audio, re-uploaded to /auralize alongside the MIDI for the mix. */
   currentFile: File | null;
   /** The user's corrections to the detected grid, which every export follows. */
   timing: TimingOverrides;
+  onSwitchToFixedTempo?: () => void;
   onTranscribeAnother: () => void;
 }) {
   const {
@@ -45,8 +52,11 @@ export function OutputBar(props: {
     progressFillRef,
     progressLabelRef,
     result,
+    notes,
+    mutedInstruments = new Set<string>(),
     currentFile,
     timing,
+    onSwitchToFixedTempo,
     onTranscribeAnother,
   } = props;
   // Label shown on the Download button while a server-side render runs, or null
@@ -67,6 +77,7 @@ export function OutputBar(props: {
   } | null>(null);
   const [sheetsOpen, setSheetsOpen] = useState(false);
   const [midiOpen, setMidiOpen] = useState(false);
+  const [flOpen, setFlOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const ready = result !== null;
 
@@ -144,12 +155,12 @@ export function OutputBar(props: {
       // Engrave grid-snapped notes whenever there is a tempo to snap them to:
       // notation made from raw transcription can have spurious 128th notes etc.
       const quantized = correctedGrid(result.beatGrid, timing) !== null;
-      const engrave = await exportMidi(result.notes, result.beatGrid, timing, {
+      const engrave = await exportMidi(notes ?? result.notes, result.beatGrid, timing, {
         ...DEFAULT_CLEANUP,
         quantize: quantized,
         // A corrected tempo has no measured subdivision; sixteenths are safe.
         subdivision: isRetimed(result.beatGrid, timing) ? 4 : null,
-      });
+      }, true);
       const form = new FormData();
       form.append("midi", engrave, "transcription.mid");
       form.append("quantized", String(quantized));
@@ -213,10 +224,20 @@ export function OutputBar(props: {
         </div>
       )}
 
-      <div className="ml-auto flex items-center gap-2.5">
+      <div className="ml-auto flex flex-wrap items-center gap-2.5">
+        <Button
+          kind={ready ? "primary" : "secondary"}
+          className="inline-flex items-center gap-2"
+          disabled={!ready || busy !== null}
+          onClick={() => setFlOpen(true)}
+          title="Export multi-track MIDI, per-instrument MIDIs, C5 drum lanes, and bar-aligned WAV stems for FL Studio"
+        >
+          <IconDownload />
+          Export for FL Studio
+        </Button>
         <div className="relative" ref={menuRef}>
           <Button
-            kind={ready ? "primary" : "secondary"}
+            kind="secondary"
             className="relative inline-flex items-center gap-2 overflow-hidden"
             disabled={!ready || busy !== null}
             onClick={() => setMenuOpen((o) => !o)}
@@ -224,7 +245,7 @@ export function OutputBar(props: {
             aria-expanded={menuOpen}
           >
             <IconDownload />
-            {busy ?? "Download"}
+            {busy ?? "More exports"}
             <IconChevron
               className={clsx("transition-transform", menuOpen && "rotate-180")}
             />
@@ -322,8 +343,31 @@ export function OutputBar(props: {
       {result && midiOpen && (
         <MidiExportDialog
           result={result}
+          notes={notes}
           timing={timing}
           onClose={() => setMidiOpen(false)}
+        />
+      )}
+
+      {result && flOpen && (
+        <FlExportDialog
+          result={result}
+          notes={
+            notes ??
+            result.notes.map((n, i) => ({
+              id: n.id ?? i,
+              instrument: n.instrument,
+              pitch: n.pitch,
+              start: n.start,
+              end: n.end,
+              velocity: n.velocity ?? 100,
+            }))
+          }
+          mutedInstruments={mutedInstruments}
+          timing={timing}
+          songName={stem()}
+          onSwitchToFixedTempo={() => onSwitchToFixedTempo?.()}
+          onClose={() => setFlOpen(false)}
         />
       )}
     </div>

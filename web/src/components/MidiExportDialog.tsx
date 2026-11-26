@@ -4,6 +4,7 @@ import { Button } from "./Button";
 import { IconDownload } from "./icons";
 import { track } from "../analytics";
 import type { TranscriptionResult } from "../hooks/useTranscription";
+import type { EditableNote } from "../editor";
 import {
   correctedGrid,
   DEFAULT_CLEANUP,
@@ -72,10 +73,11 @@ const SELECT =
  */
 export function MidiExportDialog(props: {
   result: TranscriptionResult;
+  notes?: EditableNote[];
   timing: TimingOverrides;
   onClose: () => void;
 }) {
-  const { result, timing, onClose } = props;
+  const { result, notes, timing, onClose } = props;
   const [cleanup, setCleanup] = useState(loadCleanup);
   const [busy, setBusy] = useState(false);
   const grid = correctedGrid(result.beatGrid, timing);
@@ -123,7 +125,7 @@ export function MidiExportDialog(props: {
     });
     setBusy(true);
     try {
-      const midi = await exportMidi(result.notes, result.beatGrid, timing, options);
+      const midi = await exportMidi(notes ?? result.notes, result.beatGrid, timing, options, true);
       saveBlob(midi, result.filename);
       onClose();
     } catch (e) {
