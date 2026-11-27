@@ -126,7 +126,7 @@ class MelSpectrogramConditioner(nn.Module):
         super().__init__()
         self.dim = n_mel_bins * self.fine_frame_rate_ratio
         self.output_dim = output_dim
-        self.output_proj = nn.Linear(self.dim, output_dim)
+        self.output_proj = nn.Linear(self.dim, output_dim, device=device)
         self.device = device
         self.sample_rate = sample_rate
         self.frame_rate = frame_rate
@@ -210,7 +210,7 @@ class ClassConditioner(nn.Module):
     ):
         super().__init__()
         self.device = device
-        self.embed = nn.Embedding(num_classes + 1, output_dim).to(device)
+        self.embed = nn.Embedding(num_classes + 1, output_dim, device=device)
         self.pad_idx = 0
 
     def tokenize(self, x: list[str | None]) -> torch.Tensor:

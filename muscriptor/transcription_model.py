@@ -258,7 +258,7 @@ def _build_model(
         dtype=dtype,
     )
     # Conditioners stay fp32 (log-mel of quiet passages underflows in fp16).
-    model.condition_provider.float()
+    model.condition_provider.to(device=device, dtype=torch.float32)
     return model
 
 

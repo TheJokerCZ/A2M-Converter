@@ -216,3 +216,40 @@ def test_load_model_builds_in_target_dtype_and_loads_weights_on_cpu(monkeypatch,
     tm = TranscriptionModel.load_model(weights_path=fake_weights, device="cpu", dtype="bfloat16")
     assert seen["load_file_device"] == "cpu"
     assert tm._model.linear.weight.dtype == torch.bfloat16
+
+
+def test_build_model_places_all_params_and_buffers_on_target_device():
+    from muscriptor.modules.conditioners import ConditioningAttributes, WavCondition
+    from muscriptor.transcription_model import _ModelConfig, _build_model
+
+    tiny_cfg = _ModelConfig(dim=32, num_heads=2, num_layers=1, card=1395)
+    meta_model = _build_model(torch.device("meta"), tiny_cfg, dtype=torch.bfloat16)
+    bad_params = [n for n, p in meta_model.named_parameters() if p.device.type != "meta"]
+    bad_buffers = [n for n, b in meta_model.named_buffers() if b.device.type != "meta"]
+    assert bad_params == []
+    assert bad_buffers == []
+
+    if torch.cuda.is_available():
+        cuda_model = _build_model(torch.device("cuda"), tiny_cfg, dtype=torch.bfloat16)
+        cuda_model.eval()
+        cond = ConditioningAttributes(
+            text={"instrument_group": "0", "dataset_name": "0"},
+            wav={
+                "self_wav": WavCondition(
+                    wav=torch.zeros(1, 1, 16000),
+                    length=torch.tensor([16000]),
+                    sample_rate=[16000],
+                )
+            },
+        )
+        tokens = list(
+            cuda_model.generate(
+                conditions=[cond],
+                max_gen_len=2,
+                use_sampling=False,
+                cfg_coef=1.0,
+                early_stop_on_token=1,
+                beam_size=2,
+            )
+        )
+        assert len(tokens) > 0
